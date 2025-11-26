@@ -29,9 +29,15 @@ import {
 import { PageCanvas } from "@/renderer/canvas/PageCanvas";
 import { exportPagesToPng, renderPageToDataURL } from "@/renderer/canvas";
 import { savePngsMultiSheet } from "@/utils/file";
+import { convertImageFormat, compressImage } from "@/utils/image";
 import { DragDropZone } from "@/components/DragDropZone";
 import { ImageUploadModal } from "@/components/ImageUploadModal";
 import { TextEditModal } from "@/components/TextEditModal";
+import {
+  DownloadHistory,
+  type DownloadItem,
+} from "@/components/DownloadHistory";
+import { DownloadMenu } from "@/components/DownloadMenu";
 
 function defaultStyle(): StyleCfg {
   return {
@@ -105,7 +111,7 @@ const CanvasCell = memo(
     zoomPct: number;
     estHeight: number;
     onMeasured: (h: number) => void;
-    onDownload: () => void;
+    onDownload: (type: "original" | "tinypng", format: "png" | "webp") => void;
     onTextClick: (info: any) => void;
     onImageClick: (info: any) => void;
     tableImageSize: number;
@@ -204,7 +210,7 @@ const CanvasCell = memo(
             </Stage>
           )}
 
-          {/* 悬浮时显示下载按钮 */}
+          {/* 悬浮时显示下载菜单 */}
           {isHovered && (
             <div
               style={{
@@ -214,16 +220,7 @@ const CanvasCell = memo(
                 zIndex: 10,
               }}
             >
-              <Button
-                isIconOnly
-                aria-label="下载"
-                color="success"
-                size="sm"
-                variant="shadow"
-                onPress={onDownload}
-              >
-                ⬇️
-              </Button>
+              <DownloadMenu onDownload={onDownload} />
             </div>
           )}
         </div>
@@ -353,6 +350,11 @@ export default function PreviewPage() {
   const [renderTotal, setRenderTotal] = useState(0);
   const [zipPercent, setZipPercent] = useState(0);
   const [writePercent, setWritePercent] = useState(0);
+
+
+  // 下载历史
+  const [downloadHistory, setDownloadHistory] = useState<DownloadItem[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
   // 防抖更新画布样式 - style 变化后 500ms 更新 debouncedStyle
   const debounceTimerRef = useRef<number | null>(null);
@@ -735,9 +737,38 @@ export default function PreviewPage() {
     [editingImage, data, allSheets, currentSheet],
   );
 
+  // 处理单个图片下载
+  const processImageDownload = useCallback(
+    async (
+      dataUrl: string,
+      _fileName: string,
+      type: "original" | "tinypng",
+      format: "png" | "webp",
+    ): Promise<string> => {
+      let processedUrl = dataUrl;
+
+      // 转换格式（如果需要）
+      if (format === "webp") {
+        processedUrl = await convertImageFormat(dataUrl, "webp");
+      }
+
+      // 压缩（如果需要）
+      if (type === "tinypng") {
+        processedUrl = await compressImage(processedUrl, format);
+      }
+
+      return processedUrl;
+    },
+    [],
+  );
+
   // 下载单个页面
   const onDownloadPage = useCallback(
-    async (pageIndex: number) => {
+    async (
+      pageIndex: number,
+      type: "original" | "tinypng",
+      format: "png" | "webp",
+    ) => {
       try {
         const page = data.pages[pageIndex];
         const dataUrl = await renderPageToDataURL(
@@ -749,24 +780,111 @@ export default function PreviewPage() {
         // 使用 page.region 作为文件名
         const regionName = page.region || `page-${pageIndex + 1}`;
         const sanitizedName = regionName.replace(/[<>:"/\\|?*]/g, "_");
-        const fileName = `${sanitizedName}.png`;
+        const ext = format === "webp" ? "webp" : "png";
+        const fileName = `${sanitizedName}.${ext}`;
 
-        // 触发下载
-        const a = document.createElement("a");
+        // 生成或使用当前会话ID
+        const sessionId = currentSessionId || Date.now().toString();
+        if (!currentSessionId) {
+          setCurrentSessionId(sessionId);
+        }
 
-        a.href = dataUrl;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        // 处理图片（原图和TinyPNG都添加到下载历史）
+        if (type === "original") {
+          // 原图：同步处理并下载
+          const processedUrl = await processImageDownload(
+            dataUrl,
+            fileName,
+            "original",
+            format,
+          );
 
-        console.log(`✓ 已下载: ${fileName}`);
+          // 添加到下载历史
+          const itemId = `${sessionId}-${Date.now()}-${pageIndex}`;
+          const item: DownloadItem = {
+            id: itemId,
+            name: fileName,
+            status: "ready",
+            format: format,
+            type: "original",
+            timestamp: Date.now(),
+            dataUrl: processedUrl,
+          };
+
+          setDownloadHistory((prev) => [...prev, item]);
+
+          // 触发下载
+          const a = document.createElement("a");
+
+          a.href = processedUrl;
+          a.download = fileName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        } else {
+          // TinyPNG：异步处理，添加到下载历史
+          const itemId = `${sessionId}-${Date.now()}-${pageIndex}`;
+          const item: DownloadItem = {
+            id: itemId,
+            name: fileName,
+            status: "processing",
+            format: format,
+            type: "tinypng",
+            timestamp: Date.now(),
+          };
+
+          setDownloadHistory((prev) => [...prev, item]);
+
+          // 异步处理
+          processImageDownload(dataUrl, fileName, "tinypng", format)
+            .then((processedUrl) => {
+              setDownloadHistory((prev) =>
+                prev.map((i) =>
+                  i.id === itemId
+                    ? { ...i, status: "ready" as const, dataUrl: processedUrl }
+                    : i,
+                ),
+              );
+            })
+            .catch((error) => {
+              setDownloadHistory((prev) =>
+                prev.map((i) =>
+                  i.id === itemId
+                    ? {
+                        ...i,
+                        status: "error" as const,
+                        error: error.message || "处理失败",
+                      }
+                    : i,
+                ),
+              );
+            });
+        }
       } catch (e: any) {
         alert(`下载失败: ${e?.message ?? String(e)}`);
       }
     },
-    [data, debouncedStyle, pixelRatio],
+    [data, debouncedStyle, pixelRatio, processImageDownload, currentSessionId],
   );
+
+  // 从下载历史下载
+  const handleDownloadFromHistory = useCallback((item: DownloadItem) => {
+    if (!item.dataUrl) return;
+
+    const a = document.createElement("a");
+
+    a.href = item.dataUrl;
+    a.download = item.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
+  // 清空下载历史
+  const handleClearHistory = useCallback(() => {
+    setDownloadHistory([]);
+    setCurrentSessionId(null);
+  }, []);
 
   const onExport = useCallback(async () => {
     setLoading(true);
@@ -774,6 +892,10 @@ export default function PreviewPage() {
     setRenderCurr(0);
     setZipPercent(0);
     setWritePercent(0);
+
+    // 生成新的会话ID
+    const sessionId = Date.now().toString();
+    setCurrentSessionId(sessionId);
 
     try {
       const allExports: Array<{
@@ -808,7 +930,7 @@ export default function PreviewPage() {
         allExports.push({ sheetName, items });
       }
 
-      // 第二步：打包、写入和下载
+      // 打包、写入和下载（批量导出只支持原图PNG）
       setExportPhase("zip");
       setZipPercent(0);
       const res = await savePngsMultiSheet(
@@ -1416,7 +1538,7 @@ export default function PreviewPage() {
                 style={debouncedStyle}
                 tableImageSize={tableImageSize}
                 zoomPct={deferredZoom}
-                onDownload={() => onDownloadPage(index)}
+                onDownload={(type, format) => onDownloadPage(index, type, format)}
                 onImageClick={(info) => handleImageClick(index, info)}
                 onMeasured={onMeasuredByIndex(index)}
                 onTextClick={(info) => handleTextClick(index, info)}
@@ -1445,6 +1567,14 @@ export default function PreviewPage() {
         isOpen={!!editingImage}
         onClose={() => setEditingImage(null)}
         onSave={handleImageSave}
+      />
+
+      {/* 下载历史组件 */}
+      <DownloadHistory
+        currentSessionId={currentSessionId}
+        items={downloadHistory}
+        onClear={handleClearHistory}
+        onDownload={handleDownloadFromHistory}
       />
     </div>
   );
