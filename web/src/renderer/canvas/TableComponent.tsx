@@ -59,40 +59,85 @@ export function TableComponent({
     Map<string, CanvasImageSource>
   >(new Map());
 
+  // 存储图片加载状态
+  const [imageLoadingStatus, setImageLoadingStatus] = useState<
+    Map<string, "loading" | "loaded" | "error" | "none">
+  >(new Map());
+
   // 重试计数器，避免无限重试
   const retryCountRef = useRef(0);
   const maxRetries = 5;
 
-  // 加载所有表格中的图片
+  // 追踪图片加载完成数量，用于强制触发高度更新
+  const [loadedImageCount, setLoadedImageCount] = useState(0);
+
+  // 加载所有表格中的图片（渐进式加载，带状态追踪）
   useEffect(() => {
     const loadImages = async () => {
       const newImages = new Map<string, CanvasImageSource>();
+      const statusMap = new Map<
+        string,
+        "loading" | "loaded" | "error" | "none"
+      >();
+
+      // 收集所有需要加载的图片
+      const imagesToLoad: Array<{
+        key: string;
+        url: string;
+        rowIdx: number;
+        colIdx: number;
+      }> = [];
 
       for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
         const row = table.rows[rowIdx];
 
         for (let colIdx = 0; colIdx < row.length; colIdx++) {
           const cell = row[colIdx];
+          const key = `${rowIdx}-${colIdx}`;
 
-          if (cell.is_image && cell.image) {
-            const key = `${rowIdx}-${colIdx}`;
-
+          if (cell.is_image) {
             // 处理新旧两种格式：字符串 URL 或 ImageMeta 对象（与奖励图片一致）
             const imageUrl =
               typeof cell.image === "string" ? cell.image : cell.image?.url;
 
             if (imageUrl) {
-              const bmp = await loadBitmap(imageUrl);
-
-              if (bmp) {
-                newImages.set(key, bmp as any);
-              }
+              imagesToLoad.push({ key, url: imageUrl, rowIdx, colIdx });
+              statusMap.set(key, "loading");
+            } else {
+              // 标记为图片但没有URL，设置为none状态
+              statusMap.set(key, "none");
             }
           }
         }
       }
 
-      setLoadedImages(newImages);
+      // 先设置所有图片为加载中
+      setImageLoadingStatus(new Map(statusMap));
+
+      // 按顺序加载图片（利用并发控制）
+      let completedCount = 0;
+      for (const { key, url } of imagesToLoad) {
+        try {
+          const bmp = await loadBitmap(url);
+
+          if (bmp) {
+            newImages.set(key, bmp as any);
+            statusMap.set(key, "loaded");
+          } else {
+            statusMap.set(key, "error");
+          }
+        } catch (error) {
+          console.error(`[TableComponent] 图片加载失败 ${url}:`, error);
+          statusMap.set(key, "error");
+        }
+
+        completedCount++;
+
+        // 每加载一张图片就更新状态，实现渐进式加载
+        setImageLoadingStatus(new Map(statusMap));
+        setLoadedImages(new Map(newImages));
+        setLoadedImageCount(completedCount); // 更新加载完成计数
+      }
     };
 
     loadImages();
@@ -180,7 +225,7 @@ export function TableComponent({
     return { layout, matrix };
   }, [table.rows, colCount]);
 
-  // 测量所有单元格的实际高度
+  // 测量所有单元格的实际高度（依赖图片加载状态）
   useLayoutEffect(() => {
     const newHeights = new Map<string, number>();
     let hasChanges = false;
@@ -234,7 +279,7 @@ export function TableComponent({
 
       return () => clearTimeout(timer);
     }
-  });
+  }, [loadedImageCount]); // 依赖图片加载完成计数
 
   // 移除了表头高度计算（没有表头概念了）
 
@@ -304,12 +349,29 @@ export function TableComponent({
 
   useLayoutEffect(() => {
     if (onHeightMeasuredRef.current && totalHeight > 0) {
-      onHeightMeasuredRef.current(totalHeight);
+      // 使用 requestAnimationFrame 确保DOM已经更新完成
+      const rafId = requestAnimationFrame(() => {
+        if (onHeightMeasuredRef.current) {
+          onHeightMeasuredRef.current(totalHeight);
+        }
+      });
+
+      return () => cancelAnimationFrame(rafId);
     }
-  }, [totalHeight]);
+  }, [totalHeight, loadedImageCount]); // 依赖图片加载完成计数，确保每次加载都触发
 
   return (
     <Group x={x} y={y}>
+      {/* 整个表格的统一背景 */}
+      <Rect
+        cornerRadius={cornerRadius}
+        fill="rgba(255, 255, 255, 0.1)"
+        height={totalHeight}
+        width={width}
+        x={0}
+        y={0}
+      />
+
       {/* 表格行（所有行都是数据行，没有表头） */}
       {table.rows.map((row, rowIdx) => {
         const pos = rowPositions[rowIdx];
@@ -317,28 +379,9 @@ export function TableComponent({
         if (!pos) return null;
 
         const { y: rowY, height: rowH } = pos;
-        const isFirstRow = rowIdx === 0;
-        const isLastRow = rowIdx === table.rows.length - 1;
 
         return (
           <Group key={`row-${rowIdx}`}>
-            {/* 行背景 - 第一行添加上方圆角，最后一行添加下方圆角 */}
-            <Rect
-              cornerRadius={
-                isFirstRow && isLastRow
-                  ? cornerRadius
-                  : isFirstRow
-                    ? [cornerRadius, cornerRadius, 0, 0]
-                    : isLastRow
-                      ? [0, 0, cornerRadius, cornerRadius]
-                      : 0
-              }
-              fill="rgba(255, 255, 255, 0.1)"
-              height={rowH}
-              width={width}
-              x={0}
-              y={rowY}
-            />
 
             {/* 数据单元格内容 */}
             {cellLayout.layout
@@ -370,102 +413,167 @@ export function TableComponent({
                 // 如果是图片
                 if (cell.is_image && cell.image) {
                   const bmp = loadedImages.get(key);
+                  const loadingStatus = imageLoadingStatus.get(key);
 
-                  if (bmp) {
-                    // 计算图片尺寸：尽量充满单元格，保持比例，留间距
-                    // 添加最大高度限制
-                    const maxImgWidth = cellWidth - cellPadding * 2;
-                    const maxImgHeight = Math.min(
-                      cellHeight - cellPadding * 2,
-                      maxImageHeight,
-                    );
+                  // 计算图片区域（用于占位符和实际图片）
+                  const maxImgWidth = cellWidth - cellPadding * 2;
+                  const maxImgHeight = Math.min(
+                    cellHeight - cellPadding * 2,
+                    maxImageHeight,
+                  );
 
-                    // 获取图片的原始尺寸
-                    const originalW = (bmp as any).width || 1;
-                    const originalH = (bmp as any).height || 1;
-                    const imgAspect = originalW / originalH;
+                  const isHovered =
+                    !forExport &&
+                    hoveredCell?.row === rowIdx &&
+                    hoveredCell?.col === actualColIdx;
 
-                    let imgW = maxImgWidth;
-                    let imgH = imgW / imgAspect;
+                  return (
+                    <Group key={key}>
+                      {/* 透明热区 - 覆盖整个单元格 */}
+                      <Rect
+                        fill="transparent"
+                        height={cellHeight}
+                        listening={!forExport}
+                        width={cellWidth}
+                        x={cellX}
+                        y={rowY}
+                        onClick={() => {
+                          if (!forExport && onImageClick) {
+                            const imageUrl =
+                              typeof cell.image === "string"
+                                ? cell.image
+                                : cell.image?.url;
 
-                    // 如果高度超出，按高度缩放
-                    if (imgH > maxImgHeight) {
-                      imgH = maxImgHeight;
-                      imgW = imgH * imgAspect;
-                    }
-
-                    // 居中显示图片（水平和垂直都居中）
-                    const imgX = cellX + (cellWidth - imgW) / 2;
-                    const imgY = rowY + (cellHeight - imgH) / 2;
-
-                    const isHovered =
-                      !forExport &&
-                      hoveredCell?.row === rowIdx &&
-                      hoveredCell?.col === actualColIdx;
-
-                    return (
-                      <Group key={key}>
-                        {/* 透明热区 - 覆盖整个单元格 */}
-                        <Rect
-                          fill="transparent"
-                          height={cellHeight}
-                          listening={!forExport}
-                          width={cellWidth}
-                          x={cellX}
-                          y={rowY}
-                          onClick={() => {
-                            if (!forExport && onImageClick) {
-                              const imageUrl =
-                                typeof cell.image === "string"
-                                  ? cell.image
-                                  : cell.image?.url;
-
-                              onImageClick(rowIdx, actualColIdx, imageUrl);
-                            }
-                          }}
-                          onMouseEnter={() =>
-                            !forExport &&
-                            setHoveredCell({ row: rowIdx, col: actualColIdx })
+                            onImageClick(rowIdx, actualColIdx, imageUrl);
                           }
-                          onMouseLeave={() =>
-                            !forExport && setHoveredCell(null)
-                          }
-                        />
-                        {/* 图片内容 */}
-                        <KImage
-                          ref={(node) => {
-                            if (node) {
-                              imageRefs.current.set(key, node);
-                            } else {
-                              imageRefs.current.delete(key);
-                            }
-                          }}
-                          height={imgH}
-                          image={bmp as any}
-                          listening={false}
-                          width={imgW}
-                          x={imgX}
-                          y={imgY}
-                        />
-                        {/* 悬浮边框 */}
-                        {isHovered && (
+                        }}
+                        onMouseEnter={() =>
+                          !forExport &&
+                          setHoveredCell({ row: rowIdx, col: actualColIdx })
+                        }
+                        onMouseLeave={() =>
+                          !forExport && setHoveredCell(null)
+                        }
+                      />
+
+                      {/* 加载状态：显示占位符 - 只有在确实有图片URL时才显示 */}
+                      {loadingStatus === "loading" && cell.image && (
+                        <Group>
+                          {/* 浅灰色背景 */}
                           <Rect
-                            dash={[5, 5]}
-                            height={cellHeight - 2}
-                            listening={false}
-                            stroke="#ff3333"
-                            strokeWidth={2}
-                            width={cellWidth - 2}
-                            x={cellX + 1}
-                            y={rowY + 1}
+                            cornerRadius={4}
+                            fill="#f0f0f0"
+                            height={maxImgHeight}
+                            width={maxImgWidth}
+                            x={cellX + cellPadding}
+                            y={rowY + (cellHeight - maxImgHeight) / 2}
                           />
-                        )}
-                      </Group>
-                    );
-                  }
+                          {/* 加载动画 - 简单的脉动效果 */}
+                          <Rect
+                            cornerRadius={4}
+                            fill="#e0e0e0"
+                            height={maxImgHeight * 0.6}
+                            opacity={0.5}
+                            width={maxImgWidth * 0.6}
+                            x={cellX + cellPadding + maxImgWidth * 0.2}
+                            y={rowY + (cellHeight - maxImgHeight * 0.6) / 2}
+                          />
+                          {/* 加载文字 */}
+                          <Text
+                            align="center"
+                            fill="#999"
+                            fontSize={12}
+                            text="Loading..."
+                            verticalAlign="middle"
+                            width={maxImgWidth}
+                            x={cellX + cellPadding}
+                            y={rowY + cellHeight / 2 - 6}
+                          />
+                        </Group>
+                      )}
 
-                  // 图片加载中或未加载，返回空占位
-                  return null;
+                      {/* 错误状态 - 只有在确实有图片URL但加载失败时才显示 */}
+                      {loadingStatus === "error" && cell.image && (
+                        <Group>
+                          <Rect
+                            cornerRadius={4}
+                            fill="#ffebee"
+                            height={maxImgHeight}
+                            width={maxImgWidth}
+                            x={cellX + cellPadding}
+                            y={rowY + (cellHeight - maxImgHeight) / 2}
+                          />
+                          <Text
+                            align="center"
+                            fill="#d32f2f"
+                            fontSize={12}
+                            text="❌ 加载失败"
+                            verticalAlign="middle"
+                            width={maxImgWidth}
+                            x={cellX + cellPadding}
+                            y={rowY + cellHeight / 2 - 6}
+                          />
+                        </Group>
+                      )}
+
+                      {/* 图片已加载：显示图片 */}
+                      {bmp && loadingStatus === "loaded" && (
+                        <>
+                          {(() => {
+                            // 计算图片尺寸：尽量充满单元格，保持比例，留间距
+                            const originalW = (bmp as any).width || 1;
+                            const originalH = (bmp as any).height || 1;
+                            const imgAspect = originalW / originalH;
+
+                            let imgW = maxImgWidth;
+                            let imgH = imgW / imgAspect;
+
+                            // 如果高度超出，按高度缩放
+                            if (imgH > maxImgHeight) {
+                              imgH = maxImgHeight;
+                              imgW = imgH * imgAspect;
+                            }
+
+                            // 居中显示图片（水平和垂直都居中）
+                            const imgX = cellX + (cellWidth - imgW) / 2;
+                            const imgY = rowY + (cellHeight - imgH) / 2;
+
+                            return (
+                              <KImage
+                                ref={(node) => {
+                                  if (node) {
+                                    imageRefs.current.set(key, node);
+                                  } else {
+                                    imageRefs.current.delete(key);
+                                  }
+                                }}
+                                height={imgH}
+                                image={bmp as any}
+                                listening={false}
+                                width={imgW}
+                                x={imgX}
+                                y={imgY}
+                              />
+                            );
+                          })()}
+                        </>
+                      )}
+
+                      {/* 悬浮边框 */}
+                      {isHovered && (
+                        <Rect
+                          dash={[5, 5]}
+                          height={cellHeight - 2}
+                          listening={false}
+                          stroke="#ff3333"
+                          strokeWidth={2}
+                          width={cellWidth - 2}
+                          x={cellX + 1}
+                          y={rowY + 1}
+                        />
+                      )}
+                    </Group>
+                  );
                 }
 
                 // 文字内容
@@ -544,7 +652,7 @@ export function TableComponent({
               })}
 
             {/* 行分割线 - 分段绘制，跳过合并单元格 */}
-            {!isLastRow &&
+            {rowIdx < table.rows.length - 1 &&
               (() => {
                 const segments: Array<{ start: number; end: number }> = [];
                 let segmentStart: number | null = null;
@@ -601,12 +709,26 @@ export function TableComponent({
                 ));
               })()}
 
-            {/* 列分割线 - 只在当前行的列边界绘制，跳过跨列单元格 */}
+            {/* 列分割线 - 考虑 rowspan，延伸到跨越的所有行 */}
             {cellLayout.layout
               .filter((item) => item.rowIdx === rowIdx && item.colIdx > 0)
               .map((item) => {
                 // 在单元格左侧绘制分割线
                 const colIdx = item.colIdx;
+                const { rowspan } = item;
+
+                // 计算跨行单元格的总高度
+                let totalHeight = 0;
+                for (
+                  let r = rowIdx;
+                  r < rowIdx + rowspan && r < table.rows.length;
+                  r++
+                ) {
+                  const rPos = rowPositions[r];
+                  if (rPos) {
+                    totalHeight += rPos.height;
+                  }
+                }
 
                 return (
                   <Line
@@ -615,7 +737,7 @@ export function TableComponent({
                       colIdx * colWidth,
                       rowY,
                       colIdx * colWidth,
-                      rowY + rowH,
+                      rowY + totalHeight,
                     ]}
                     stroke="rgba(0, 0, 0, 0.3)"
                     strokeWidth={1}

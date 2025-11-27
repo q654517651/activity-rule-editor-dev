@@ -323,6 +323,12 @@ export default function PreviewPage() {
   const [uploadedBorderFile, setUploadedBorderFile] = useState<string | null>(
     null,
   ); // 已上传的边框图文件名
+  const [uploadedBlockTitleBg, setUploadedBlockTitleBg] = useState<string | null>(
+    null,
+  ); // 已上传的大标题背景文件名
+  const [uploadedSectionTitleBg, setUploadedSectionTitleBg] = useState<string | null>(
+    null,
+  ); // 已上传的小标题背景文件名
 
   // 编辑功能状态
   const [editingText, setEditingText] = useState<{
@@ -516,6 +522,60 @@ export default function PreviewPage() {
   const onDeleteBorderFile = useCallback(() => {
     setStyle((s) => ({ ...s, border: { ...s.border, image: "" } }));
     setUploadedBorderFile(null);
+  }, []);
+
+  // 上传大标题背景
+  const onPickBlockTitleBg = useCallback(async (file: File) => {
+    const blobUrl = URL.createObjectURL(file);
+
+    try {
+      const res = await fetch(blobUrl);
+      const blob = await res.blob();
+      const d = await new Promise<string>((resolve) => {
+        const fr = new FileReader();
+
+        fr.onload = () => resolve(fr.result as string);
+        fr.readAsDataURL(blob);
+      });
+
+      setStyle((s) => ({ ...s, blockTitleBg: d }));
+      setUploadedBlockTitleBg(file.name);
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
+  }, []);
+
+  // 删除大标题背景
+  const onDeleteBlockTitleBg = useCallback(() => {
+    setStyle((s) => ({ ...s, blockTitleBg: undefined }));
+    setUploadedBlockTitleBg(null);
+  }, []);
+
+  // 上传小标题背景
+  const onPickSectionTitleBg = useCallback(async (file: File) => {
+    const blobUrl = URL.createObjectURL(file);
+
+    try {
+      const res = await fetch(blobUrl);
+      const blob = await res.blob();
+      const d = await new Promise<string>((resolve) => {
+        const fr = new FileReader();
+
+        fr.onload = () => resolve(fr.result as string);
+        fr.readAsDataURL(blob);
+      });
+
+      setStyle((s) => ({ ...s, sectionTitleBg: d }));
+      setUploadedSectionTitleBg(file.name);
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
+  }, []);
+
+  // 删除小标题背景
+  const onDeleteSectionTitleBg = useCallback(() => {
+    setStyle((s) => ({ ...s, sectionTitleBg: undefined }));
+    setUploadedSectionTitleBg(null);
   }, []);
 
   // Sheet 切换处理 - 简单清理即可，虚拟化会自动处理
@@ -1236,13 +1296,109 @@ export default function PreviewPage() {
                 }
               />
             </div>
+
+            {/* 大标题背景 */}
+            <h3 className="text-sm font-semibold text-gray-700 mt-6 mb-3">
+              大标题背景（TITLE-）
+            </h3>
+            {uploadedBlockTitleBg ? (
+              <div className="relative border-2 border-gray-200 rounded-lg p-3 bg-gray-50 min-h-[120px] flex items-center">
+                <Button
+                  isIconOnly
+                  aria-label="删除大标题背景"
+                  className="absolute top-2 right-2 z-10"
+                  color="danger"
+                  size="sm"
+                  variant="flat"
+                  onPress={onDeleteBlockTitleBg}
+                >
+                  ✕
+                </Button>
+                <div className="flex items-center gap-3 pr-8 w-full">
+                  {style.blockTitleBg && (
+                    <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden border border-gray-200">
+                      <img
+                        alt="大标题背景预览"
+                        className="w-full h-full object-cover"
+                        src={style.blockTitleBg}
+                      />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">
+                      {uploadedBlockTitleBg}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">大标题背景图片</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="min-h-[120px]">
+                <DragDropZone
+                  accept="image/*"
+                  description="点击选择或拖拽图片到此处"
+                  icon="🎨"
+                  label="选择大标题背景"
+                  loading={loading}
+                  onFile={onPickBlockTitleBg}
+                />
+              </div>
+            )}
+
+            {/* 小标题背景 */}
+            <h3 className="text-sm font-semibold text-gray-700 mt-6 mb-3">
+              小标题背景（RULES-/RANK-）
+            </h3>
+            {uploadedSectionTitleBg ? (
+              <div className="relative border-2 border-gray-200 rounded-lg p-3 bg-gray-50 min-h-[120px] flex items-center">
+                <Button
+                  isIconOnly
+                  aria-label="删除小标题背景"
+                  className="absolute top-2 right-2 z-10"
+                  color="danger"
+                  size="sm"
+                  variant="flat"
+                  onPress={onDeleteSectionTitleBg}
+                >
+                  ✕
+                </Button>
+                <div className="flex items-center gap-3 pr-8 w-full">
+                  {style.sectionTitleBg && (
+                    <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden border border-gray-200">
+                      <img
+                        alt="小标题背景预览"
+                        className="w-full h-full object-cover"
+                        src={style.sectionTitleBg}
+                      />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">
+                      {uploadedSectionTitleBg}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">小标题背景图片</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="min-h-[120px]">
+                <DragDropZone
+                  accept="image/*"
+                  description="点击选择或拖拽图片到此处"
+                  icon="🎨"
+                  label="选择小标题背景"
+                  loading={loading}
+                  onFile={onPickSectionTitleBg}
+                />
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-lg border border-gray-200 p-4 mt-4">
             <h3 className="text-sm font-medium mb-4 text-gray-900">样式</h3>
 
             {/* 标题颜色 */}
-            <div className="mb-3">
+            <div className="mb-6">
               <Input
                 endContent={
                   <div
@@ -1280,7 +1436,7 @@ export default function PreviewPage() {
             </div>
 
             {/* 正文颜色 */}
-            <div className="mb-3">
+            <div className="mb-6">
               <Input
                 endContent={
                   <div
@@ -1321,7 +1477,7 @@ export default function PreviewPage() {
             </div>
 
             {/* 内边距 */}
-            <div>
+            <div className="mb-6">
               <label htmlFor="pad-t" className="text-xs font-medium text-gray-700 block mb-2">
                 内边距
               </label>
@@ -1375,6 +1531,33 @@ export default function PreviewPage() {
                     }))
                   }
                 />
+              </div>
+            </div>
+
+            {/* 字体大小 */}
+            <div>
+              <Slider
+                label="基准字号"
+                size="sm"
+                step={2}
+                minValue={24}
+                maxValue={28}
+                value={style.font.size}
+                onChange={(value) => {
+                  setStyle((s) => ({
+                    ...s,
+                    font: { ...s.font, size: value as number },
+                  }));
+                }}
+                className="max-w-full"
+                showTooltip={true}
+                tooltipProps={{
+                  placement: "top",
+                  content: `${style.font.size}px`
+                }}
+              />
+              <div className="text-xs text-gray-500 mt-2">
+                可选值: 24px、26px、28px（其他文字大小将自动调整）
               </div>
             </div>
           </div>
