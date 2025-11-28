@@ -1,6 +1,46 @@
 /* Image cache that decodes to ImageBitmap (if available) */
 const cache = new Map<string, ImageBitmap | HTMLImageElement>();
 
+// 并发控制队列
+class RequestQueue {
+  private queue: Array<() => Promise<void>> = [];
+  private running = 0;
+  private maxConcurrent = 6; // 浏览器并发限制
+
+  async add<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const task = async () => {
+        try {
+          this.running++;
+          const result = await fn();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        } finally {
+          this.running--;
+          this.processNext();
+        }
+      };
+
+      this.queue.push(task);
+      this.processNext();
+    });
+  }
+
+  private processNext() {
+    if (this.running >= this.maxConcurrent || this.queue.length === 0) {
+      return;
+    }
+
+    const task = this.queue.shift();
+    if (task) {
+      task();
+    }
+  }
+}
+
+const requestQueue = new RequestQueue();
+
 // 从 localStorage 读取 API 基址，方便调试和部署切换
 function getApiBase(): string {
   if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
@@ -47,18 +87,63 @@ function normalizeImageUrl(url: string): string {
   return url;
 }
 
-async function fetchAsBlob(url: string): Promise<Blob> {
-  if (url.startsWith("data:")) {
-    // data URL → Blob
-    const res = await fetch(url);
+// 带超时和重试的 fetch
+async function fetchAsBlob(
+  url: string,
+  retries = 3,
+  timeout = 10000,
+): Promise<Blob> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    return await res.blob();
+      if (url.startsWith("data:")) {
+        // data URL → Blob
+        const res = await fetch(url);
+        clearTimeout(timeoutId);
+        return await res.blob();
+      }
+
+      const res = await fetch(url, {
+        signal: controller.signal,
+        cache: "force-cache", // 使用浏览器缓存
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        throw new Error(`fetch failed: ${res.status}`);
+      }
+
+      return await res.blob();
+    } catch (error: any) {
+      const isLastAttempt = attempt === retries;
+
+      // 如果是最后一次尝试，抛出错误
+      if (isLastAttempt) {
+        throw error;
+      }
+
+      // 如果是 abort 错误（超时），等待后重试
+      if (error.name === "AbortError") {
+        console.warn(
+          `[fetchAsBlob] 超时，重试 ${attempt + 1}/${retries}: ${url}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1))); // 指数退避
+      } else if (error.message?.includes("fetch failed")) {
+        console.warn(
+          `[fetchAsBlob] 请求失败，重试 ${attempt + 1}/${retries}: ${url}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      } else {
+        // 其他错误直接抛出
+        throw error;
+      }
+    }
   }
-  const res = await fetch(url);
 
-  if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-
-  return await res.blob();
+  throw new Error(`fetchAsBlob failed after ${retries} retries`);
 }
 
 export async function loadBitmap(
@@ -72,42 +157,47 @@ export async function loadBitmap(
   if (cache.has(normalizedUrl)) return cache.get(normalizedUrl)!;
 
   try {
-    let bmp: ImageBitmap | HTMLImageElement;
+    // 使用队列控制并发
+    const bmp = await requestQueue.add(async () => {
+      let result: ImageBitmap | HTMLImageElement;
 
-    // 对于跨源请求（http/https）或需要通过 fetch 的 URL
-    if (
-      normalizedUrl.startsWith("blob:") ||
-      normalizedUrl.startsWith("http") ||
-      normalizedUrl.startsWith("data:") ||
-      normalizedUrl.startsWith("file:")
-    ) {
-      const blob = await fetchAsBlob(normalizedUrl);
+      // 对于跨源请求（http/https）或需要通过 fetch 的 URL
+      if (
+        normalizedUrl.startsWith("blob:") ||
+        normalizedUrl.startsWith("http") ||
+        normalizedUrl.startsWith("data:") ||
+        normalizedUrl.startsWith("file:")
+      ) {
+        const blob = await fetchAsBlob(normalizedUrl);
 
-      if ("createImageBitmap" in window) {
-        bmp = await createImageBitmap(blob);
+        if ("createImageBitmap" in window) {
+          result = await createImageBitmap(blob);
+        } else {
+          const img = new Image();
+
+          img.crossOrigin = "anonymous";
+          img.src = URL.createObjectURL(blob);
+          await new Promise<void>((res, rej) => {
+            img.onload = () => res();
+            img.onerror = () => rej(new Error("image load error"));
+          });
+          result = img;
+        }
       } else {
+        // 本地资源（应该不会走到这里，但保留作备份）
         const img = new Image();
 
         img.crossOrigin = "anonymous";
-        img.src = URL.createObjectURL(blob);
+        img.src = normalizedUrl;
         await new Promise<void>((res, rej) => {
           img.onload = () => res();
           img.onerror = () => rej(new Error("image load error"));
         });
-        bmp = img;
+        result = img;
       }
-    } else {
-      // 本地资源（应该不会走到这里，但保留作备份）
-      const img = new Image();
 
-      img.crossOrigin = "anonymous";
-      img.src = normalizedUrl;
-      await new Promise<void>((res, rej) => {
-        img.onload = () => res();
-        img.onerror = () => rej(new Error("image load error"));
-      });
-      bmp = img;
-    }
+      return result;
+    });
 
     cache.set(normalizedUrl, bmp);
 

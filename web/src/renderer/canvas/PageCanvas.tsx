@@ -14,6 +14,7 @@ import { Group, Image as KImage, Text, Rect } from "react-konva";
 import { loadBitmap } from "./useImageCache";
 import { NineSlice } from "./nineSlice";
 import { TableComponent } from "./TableComponent";
+import { ParagraphComponent } from "./ParagraphComponent";
 // Konva Text 组件的 direction 属性类型已在 konva-extensions.d.ts 中扩展
 
 /**
@@ -88,6 +89,9 @@ function RewardItem({
   rewardPath?: string;
 }) {
   const [rewardImg, setRewardImg] = useState<CanvasImageSource | null>(null);
+  const [imageStatus, setImageStatus] = useState<
+    "loading" | "loaded" | "error" | "none"
+  >("none");
   const nameRef = useRef<Konva.Text>(null);
   const descRef = useRef<Konva.Text>(null);
   const [hoveredPart, setHoveredPart] = useState<
@@ -95,11 +99,16 @@ function RewardItem({
   >(null);
 
   useEffect(() => {
+    // 如果奖励没有图片，设置为 none 状态（不显示任何图片相关UI）
     if (!reward.image) {
       setRewardImg(null);
+      setImageStatus("none");
 
       return;
     }
+
+    setImageStatus("loading");
+
     (async () => {
       // 处理新旧两种格式：字符串 URL 或 ImageMeta 对象
       const imageUrl =
@@ -107,17 +116,28 @@ function RewardItem({
 
       if (!imageUrl) {
         setRewardImg(null);
+        setImageStatus("none");
 
         return;
       }
 
-      const bmp = await loadBitmap(imageUrl);
+      try {
+        const bmp = await loadBitmap(imageUrl);
 
-      setRewardImg(bmp as any);
+        if (bmp) {
+          setRewardImg(bmp as any);
+          setImageStatus("loaded");
+        } else {
+          setImageStatus("error");
+        }
+      } catch (error) {
+        console.error(`[RewardItem] 图片加载失败 ${imageUrl}:`, error);
+        setImageStatus("error");
+      }
     })();
   }, [reward.image]);
 
-  // 测量实际渲染高度
+  // 测量实际渲染高度（依赖 imageStatus 以便状态变化时重新测量）
   useLayoutEffect(() => {
     const imgBoxH = 160 + 8;
     const textGapV = 4;
@@ -139,7 +159,7 @@ function RewardItem({
     if (onHeightMeasured && totalH > 0) {
       onHeightMeasured(totalH);
     }
-  }, [reward.name, reward.desc, width, onHeightMeasured]);
+  }, [reward.name, reward.desc, width, onHeightMeasured, imageStatus]);
 
   // 图片尺寸（保持正方形容器，内部图片长边贴边）
   const imgBoxSize = 160;
@@ -177,8 +197,65 @@ function RewardItem({
 
   return (
     <Group x={x} y={y}>
-      {/* 奖励图片 - 在容器内垂直和水平居中，长边贴边 */}
-      {rewardImg && (
+      {/* 图片加载状态显示 - 只有在确实有图片时才显示 */}
+      {imageStatus === "loading" && reward.image && (
+        <Group>
+          {/* 占位背景 */}
+          <Rect
+            cornerRadius={8}
+            fill="#f0f0f0"
+            height={imgBoxSize}
+            width={imgBoxSize}
+            x={(width - imgBoxSize) / 2}
+            y={imgPadding}
+          />
+          {/* 加载动画 */}
+          <Rect
+            cornerRadius={8}
+            fill="#e0e0e0"
+            height={imgBoxSize * 0.6}
+            opacity={0.5}
+            width={imgBoxSize * 0.6}
+            x={(width - imgBoxSize * 0.6) / 2}
+            y={imgPadding + imgBoxSize * 0.2}
+          />
+          <Text
+            align="center"
+            fill="#999"
+            fontSize={14}
+            text="Loading..."
+            width={width}
+            x={0}
+            y={imgPadding + imgBoxSize / 2 - 7}
+          />
+        </Group>
+      )}
+
+      {/* 错误状态 - 只有在确实有图片URL但加载失败时才显示 */}
+      {imageStatus === "error" && reward.image && (
+        <Group>
+          <Rect
+            cornerRadius={8}
+            fill="#ffebee"
+            height={imgBoxSize}
+            width={imgBoxSize}
+            x={(width - imgBoxSize) / 2}
+            y={imgPadding}
+          />
+          <Text
+            align="center"
+            fill="#d32f2f"
+            fontSize={32}
+            text="❌"
+            width={width}
+            x={0}
+            y={imgPadding + imgBoxSize / 2 - 16}
+          />
+        </Group>
+      )}
+
+      {/* 奖励图片 - 已加载 */}
+      {rewardImg && imageStatus === "loaded" && (
         <>
           <KImage
             height={displayImgH}
@@ -348,6 +425,8 @@ export function PageCanvas({
   const W = style.pageWidth;
   const PAD = style.pad;
   const [borderBmp, setBorderBmp] = useState<CanvasImageSource | null>(null);
+  const [blockTitleBgBmp, setBlockTitleBgBmp] = useState<CanvasImageSource | null>(null);
+  const [sectionTitleBgBmp, setSectionTitleBgBmp] = useState<CanvasImageSource | null>(null);
 
   // 存储每个section文本的实际渲染高度
   const [measuredHeights, setMeasuredHeights] = useState<Map<string, number>>(
@@ -368,6 +447,28 @@ export function PageCanvas({
       if (bmp) setBorderBmp(bmp as any);
     })();
   }, [style.border.image]);
+
+  // 加载大标题背景
+  useEffect(() => {
+    (async () => {
+      setBlockTitleBgBmp(null);
+      if (style.blockTitleBg) {
+        const bmp = await loadBitmap(style.blockTitleBg);
+        if (bmp) setBlockTitleBgBmp(bmp as any);
+      }
+    })();
+  }, [style.blockTitleBg]);
+
+  // 加载小标题背景
+  useEffect(() => {
+    (async () => {
+      setSectionTitleBgBmp(null);
+      if (style.sectionTitleBg) {
+        const bmp = await loadBitmap(style.sectionTitleBg);
+        if (bmp) setSectionTitleBgBmp(bmp as any);
+      }
+    })();
+  }, [style.sectionTitleBg]);
 
   // 测量所有文本的实际渲染高度
   useLayoutEffect(() => {
@@ -437,10 +538,16 @@ export function PageCanvas({
           Math.ceil(style.font.size * style.font.lineHeight)
         : 0;
 
-      // section 内容高度 - 累加所有行的高度
+      // section 内容高度 - 优先使用 paragraphs，否则使用 content
       let contentH = 0;
 
-      if (section.content && contentW > 0) {
+      if (section.paragraphs && section.paragraphs.length > 0) {
+        // 使用新的段落结构
+        const paragraphKey = `section-${sectionIdx}-paragraphs`;
+        contentH = measuredHeights.get(paragraphKey) || 
+          Math.ceil(section.paragraphs.length * style.font.size * style.font.lineHeight);
+      } else if (section.content && contentW > 0) {
+        // 向后兼容旧的字符串格式
         const lines = section.content.split("\n");
 
         contentH = lines.reduce((sum, _, lineIdx) => {
@@ -650,6 +757,25 @@ export function PageCanvas({
             {/* Block 标题 - 大标题，稍大字号，水平居中 */}
             {s.section._isFirstInBlock && s.section._blockTitle ? (
               <>
+                {/* 大标题背景图（在文字下层） */}
+                {blockTitleBgBmp && (() => {
+                  const bgHeight = s.blockTitleH + 16; // 标题高度 + padding (上下各8)
+                  const bgWidth = ((blockTitleBgBmp as any).width / (blockTitleBgBmp as any).height) * bgHeight;
+                  const bgX = contentX + (contentW - bgWidth) / 2; // 水平居中
+                  const bgY = blockTitleY - 8; // 垂直居中（预留padding）
+                  
+                  return (
+                    <KImage
+                      image={blockTitleBgBmp as any}
+                      x={bgX}
+                      y={bgY}
+                      width={bgWidth}
+                      height={bgHeight}
+                      listening={false}
+                    />
+                  );
+                })()}
+                
                 <Text
                   ref={(node) => {
                     if (node) {
@@ -715,6 +841,25 @@ export function PageCanvas({
             {/* Section 标题 - 水平居中 */}
             {s.section.title ? (
               <>
+                {/* 小标题背景图（在文字下层） */}
+                {sectionTitleBgBmp && (() => {
+                  const bgHeight = s.titleH + 16; // 标题高度 + padding (上下各8)
+                  const bgWidth = ((sectionTitleBgBmp as any).width / (sectionTitleBgBmp as any).height) * bgHeight;
+                  const bgX = contentX + (contentW - bgWidth) / 2; // 水平居中
+                  const bgY = titleY - 8; // 垂直居中（预留padding）
+                  
+                  return (
+                    <KImage
+                      image={sectionTitleBgBmp as any}
+                      x={bgX}
+                      y={bgY}
+                      width={bgWidth}
+                      height={bgHeight}
+                      listening={false}
+                    />
+                  );
+                })()}
+                
                 <Text
                   ref={(node) => {
                     if (node) {
@@ -774,8 +919,40 @@ export function PageCanvas({
               </>
             ) : null}
 
-            {/* Section 内容 - 支持单行加粗 */}
-            {s.section.content ? (
+            {/* Section 内容 - 优先使用新的段落结构，否则使用旧的 content */}
+            {s.section.paragraphs && s.section.paragraphs.length > 0 ? (
+              <ParagraphComponent
+                baseFontSize={style.font.size}
+                baseFontFamily={style.font.family}
+                baseColor={style.contentColor}
+                baseLineHeight={style.font.lineHeight}
+                direction={direction}
+                forExport={forExport}
+                paragraphs={s.section.paragraphs}
+                width={contentW}
+                x={contentX}
+                y={contentY}
+                onHeightMeasured={(h) => {
+                  const key = `section-${sectionIdx}-paragraphs`;
+                  if (measuredHeights.get(key) !== h) {
+                    setMeasuredHeights((prev) => new Map(prev).set(key, h));
+                  }
+                }}
+                onTextClick={(paraIdx, text) => {
+                  if (!forExport && onTextClick) {
+                    onTextClick({
+                      path: `sections.${sectionIdx}.paragraphs.${paraIdx}`,
+                      value: text,
+                      position: { x: contentX, y: contentY },
+                      width: contentW,
+                      height: s.contentH,
+                      fontSize: style.font.size,
+                      multiline: true,
+                    });
+                  }
+                }}
+              />
+            ) : s.section.content ? (
               <>
                 <Group
                   listening={!forExport}

@@ -46,7 +46,7 @@ def build_merge_index(ws) -> Dict[Tuple[int, int], Tuple[int, int, int, int]]:
 
 
 def get_cell_info(ws, r: int, c: int, merge_idx):
-    """获取单元格的值和格式信息（加粗、对齐等）"""
+    """获取单元格的值和完整格式信息（文本、对齐、加粗、斜体、颜色）"""
     if (r, c) in merge_idx:
         r0, c0, _, _ = merge_idx[(r, c)]
         cell = ws.cell(r0, c0)
@@ -58,21 +58,46 @@ def get_cell_info(ws, r: int, c: int, merge_idx):
     
     # 检查是否为百分比格式
     if isinstance(value, (int, float)) and cell.number_format:
-        # 如果数字格式包含百分号，转换为百分比显示
         if '%' in cell.number_format:
-            # 将小数转换为百分比（0.5 → 50%）
             value = f"{value * 100:.10g}%"
     
     # 读取对齐信息
-    is_center = False
+    alignment = None
     if cell.alignment and cell.alignment.horizontal:
-        # 检查是否为居中对齐
-        is_center = cell.alignment.horizontal == 'center'
+        alignment = cell.alignment.horizontal  # 'center', 'left', 'right'
+    
+    # 读取字体信息
+    bold = False
+    italic = False
+    color = None
+    
+    if cell.font:
+        bold = bool(cell.font.bold)
+        italic = bool(cell.font.italic)
+        
+        # 读取字体颜色
+        if cell.font.color:
+            if hasattr(cell.font.color, 'rgb') and cell.font.color.rgb:
+                # RGB 格式：可能是字符串 'AARRGGBB'/'RRGGBB' 或 RGB 对象
+                rgb = cell.font.color.rgb
+                # 将 RGB 对象转换为字符串
+                if not isinstance(rgb, str):
+                    rgb = str(rgb)
+                # 去掉可能的前缀和空格
+                rgb = rgb.strip()
+                if len(rgb) == 8:  # ARGB 格式
+                    color = f"#{rgb[2:]}"
+                elif len(rgb) == 6:  # RGB 格式
+                    color = f"#{rgb}"
     
     return {
         'value': value,
-        'bold': cell.font.bold if cell.font and cell.font.bold else False,
-        'center': is_center
+        'alignment': alignment,
+        'bold': bold,
+        'italic': italic,
+        'color': color,
+        # 保留向后兼容的字段
+        'center': alignment == 'center' if alignment else False
     }
 
 
@@ -152,7 +177,7 @@ def scan_titles(ws, region, merge_idx):
 def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
     sections = []
     r = r_start
-    block_free_text = []
+    block_free_paragraphs = []  # 改为段落数组
 
     def collect_rewards(r0, section_title):
         items = []
@@ -219,9 +244,18 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
             if has_table_in_content:
                 break
             
-            # 空行停止
-            if is_row_blank(rv):
-                break
+            # 检查是否是空行（但不要停止，要保留空行）
+            # 只有当连续遇到多个空行或到达表格末尾标记时才停止
+            is_empty_row = is_row_blank(rv)
+            
+            # 如果是空行，检查下一行是否也是空行或有标记
+            # 连续两个空行才停止（避免表格中间的单个空行被跳过）
+            if is_empty_row and rr + 1 <= r_end:
+                next_rv = row_region_values(ws, rr + 1, c1, c2, merge_idx)
+                next_first = next_rv[0] if next_rv else ""
+                # 如果下一行是空行或者是标记行，则停止
+                if is_row_blank(next_rv) or next_first.startswith("TITLE-") or next_first.startswith("RINK-") or next_first.startswith("RANK-"):
+                    break
             
             # 收集这一行的数据（跳过第一列标记列，只收集后续列）
             row_data = []
@@ -282,8 +316,9 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
                 row_data.append(cell_data)
                 col_output_idx += 1
             
-            if row_data:
-                table_data["rows"].append(row_data)
+            # 始终添加行数据，即使为空（空行或被合并单元格占用的行）
+            # 这样可以保持行号的连续性，前端能正确处理 rowspan 和显示空行
+            table_data["rows"].append(row_data)
             
             rr += 1
         
@@ -306,75 +341,111 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
 
     def collect_rules_content(r0, section_title):
         """
-        收集规则内容文本
-
-        规则部分可能有以下情况：
-        1. 同一行的多列是合并的（列重复）
-        2. 多行包含相同内容（行重复）
-        需要同时进行列去重和行去重
+        收集规则内容，返回结构化的段落数组
+        
+        每个 Excel 行 → 一个 Paragraph
+        每个单元格（或合并单元格） → 一个 TextRun
+        
+        只保留：文本、对齐（左中右）、加粗、斜体、颜色
         """
-        lines = []
+        paragraphs = []
         seen_lines = set()  # 用于跨行去重
         rr = r0
 
-        # 处理起始行及后续行
         while rr <= r_end:
-            # 使用带格式的读取函数
-            rv_with_format = row_region_values_with_format(ws, rr, c1, c2, merge_idx)
-            rv = [cell['value'] for cell in rv_with_format]  # 提取文本用于检查
+            # 读取当前行的所有单元格（带格式）
+            cells_info = []
+            for c in range(c1, c2 + 1):
+                cell_info = get_cell_info(ws, rr, c, merge_idx)
+                cells_info.append(cell_info)
+            
+            # 提取纯文本用于检查
+            rv = [clean_text(cell['value']) for cell in cells_info]
 
             # 如果不是起始行，检查是否遇到标记或空行
-            # 注意：不检查RULES-，因为可能存在相同RULES标记的连续行需要合并
             if rr > r0:
-                # 检查第一列（标记列）是否有新的块级标记
                 first = rv[0] if rv else ""
                 if first and (first.startswith("TITLE-") or first.startswith("RINK-") or first.startswith("RANK-")):
                     break
                 
-                # 检查内容列（rv[1:]）是否有 TABLE- 标记
                 has_table_in_content = any(val.startswith("TABLE-") for val in rv[1:] if val)
                 if has_table_in_content:
                     break
                 
+                # 如果是空行，检查下一行是否也是空行
+                # 连续两个空行才停止（允许单个空行）
                 if is_row_blank(rv):
-                    break
+                    if rr + 1 <= r_end:
+                        next_rv = row_region_values(ws, rr + 1, c1, c2, merge_idx)
+                        next_first = next_rv[0] if next_rv else ""
+                        # 如果下一行也是空行或者是标记行，则停止
+                        if is_row_blank(next_rv) or next_first.startswith("TITLE-") or next_first.startswith("RINK-") or next_first.startswith("RANK-"):
+                            break
+                    else:
+                        # 已经是最后一行了，停止
+                        break
 
-            # 列去重：同一行中相同内容只保留一次（处理合并单元格）
-            # 同时应用居中和加粗格式
-            unique_vals = []
+            # 构建段落
+            paragraph_align = "left"  # 默认左对齐
+            runs = []
+            
+            # 列去重并构建 runs（跳过第一列标记列）
             seen_row = set()
-            for cell_info in rv_with_format[1:]:  # 跳过第一列（标记列）
-                val = cell_info['value']
-                is_bold = cell_info['bold']
-                is_center = cell_info['center']
+            for cell_info in cells_info[1:]:  # 跳过第一列
+                val = clean_text(cell_info['value'])
+                if not val or val in seen_row:
+                    continue
                 
-                if val and val not in seen_row:
-                    # 先添加居中标记
-                    if is_center:
-                        val = f"[center]{val}"
-                    
-                    # 再添加加粗标记
-                    if is_bold:
-                        val = f"**{val}**"
-                    
-                    unique_vals.append(val)
-                    seen_row.add(cell_info['value'])  # 用原始值去重
-
-            line_content = " ".join(unique_vals)
-
+                seen_row.add(val)
+                
+                # 构建 TextRun（只包含需要的字段）
+                run = {"text": val}
+                
+                # 添加样式（只在非默认值时添加）
+                if cell_info.get('bold'):
+                    run['bold'] = True
+                if cell_info.get('italic'):
+                    run['italic'] = True
+                if cell_info.get('color'):
+                    run['color'] = cell_info['color']
+                
+                # 判断段落对齐方式（从第一个有效单元格读取）
+                alignment = cell_info.get('alignment')
+                if alignment == 'center':
+                    paragraph_align = 'center'
+                elif alignment == 'right':
+                    paragraph_align = 'right'
+                elif alignment == 'left':
+                    paragraph_align = 'left'
+                
+                runs.append(run)
+            
             # 行去重：如果这一行的内容之前已经出现过，跳过
-            if line_content and line_content not in seen_lines:
-                lines.append(line_content)
-                seen_lines.add(line_content)
-            elif not line_content:
-                # 空行也保留
-                lines.append("")
-
+            # 但空行总是保留（不参与去重）
+            if runs:
+                # 用所有 runs 的文本组合作为去重 key
+                line_key = '|'.join(run['text'] for run in runs)
+                if line_key not in seen_lines:
+                    paragraphs.append({
+                        "align": paragraph_align,
+                        "runs": runs
+                    })
+                    seen_lines.add(line_key)
+            else:
+                # 空行：添加一个空 paragraph（runs 为空数组，用特殊文本表示空行）
+                paragraphs.append({
+                    "align": "left",
+                    "runs": [{"text": ""}]  # 空文本表示空行
+                })
+            
             rr += 1
 
-        # 合并所有行文本（保留空行）
-        text = "\n".join(lines).strip()
-        sections.append({"title": section_title, "content": text, "rewards": []})
+        # 返回段落数组
+        sections.append({
+            "title": section_title,
+            "paragraphs": paragraphs,
+            "rewards": []
+        })
         return rr
 
     while r <= r_end:
@@ -435,37 +506,62 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
                 sub = first.split("RINK-")[-1].strip()
             r = collect_rewards(r, sub)
             continue
-        # fallback 分支：列去重（处理合并单元格）并应用居中和加粗格式
-        rv_with_format = row_region_values_with_format(ws, r, c1, c2, merge_idx)
-        unique_vals = []
-        seen_row = set()
-        for cell_info in rv_with_format[1:]:  # 跳过第一列（标记列）
-            val = cell_info['value']
-            is_bold = cell_info['bold']
-            is_center = cell_info['center']
-            
-            if val and val not in seen_row:
-                # 先添加居中标记
-                if is_center:
-                    val = f"[center]{val}"
-                
-                # 再添加加粗标记
-                if is_bold:
-                    val = f"**{val}**"
-                
-                unique_vals.append(val)
-                seen_row.add(cell_info['value'])  # 用原始值去重
+        # fallback 分支：构建结构化段落
+        # 读取当前行的所有单元格（带格式）
+        cells_info = []
+        for c in range(c1, c2 + 1):
+            cell_info = get_cell_info(ws, r, c, merge_idx)
+            cells_info.append(cell_info)
         
-        if unique_vals:
-            block_free_text.extend(unique_vals)
-        elif not any(rv_with_format[i]['value'] for i in range(1, len(rv_with_format))):
-            # 如果整行都是空的（除了标记列），添加空字符串
-            block_free_text.append("")
+        # 构建段落
+        paragraph_align = "left"
+        runs = []
+        seen_row = set()
+        
+        for cell_info in cells_info[1:]:  # 跳过第一列（标记列）
+            val = clean_text(cell_info['value'])
+            if not val or val in seen_row:
+                continue
+            
+            seen_row.add(val)
+            
+            # 构建 TextRun
+            run = {"text": val}
+            
+            # 添加样式
+            if cell_info.get('bold'):
+                run['bold'] = True
+            if cell_info.get('italic'):
+                run['italic'] = True
+            if cell_info.get('color'):
+                run['color'] = cell_info['color']
+            
+            # 判断段落对齐方式
+            alignment = cell_info.get('alignment')
+            if alignment == 'center':
+                paragraph_align = 'center'
+            elif alignment == 'right':
+                paragraph_align = 'right'
+            
+            runs.append(run)
+        
+        # 添加段落（包括空行）
+        if runs:
+            block_free_paragraphs.append({
+                "align": paragraph_align,
+                "runs": runs
+            })
+        else:
+            # 空行：添加一个空 paragraph
+            block_free_paragraphs.append({
+                "align": "left",
+                "runs": [{"text": ""}]  # 空文本表示空行
+            })
+        
         r += 1
 
-    # 合并 fallback 文本（保留空行）
-    fallback_text = "\n".join(block_free_text).strip()
-    return sections, fallback_text
+    # 返回段落数组
+    return sections, block_free_paragraphs
 
 
 def merge_reward_sections(sections):
@@ -481,7 +577,7 @@ def merge_reward_sections(sections):
                 title_to_index[title] = len(merged)
                 merged.append({
                     "title": title,
-                    "content": "",
+                    "paragraphs": [],  # 使用空段落数组而不是空字符串
                     "rewards": list(s.get("rewards") or [])
                 })
         else:
@@ -530,7 +626,8 @@ def parse_sheet(ws) -> dict:
             if secs:
                 merged_secs = merge_reward_sections(secs)
             else:
-                merged_secs = [{"title": title_text or title_type, "content": fallback, "rewards": []}]
+                # fallback 现在返回段落数组
+                merged_secs = [{"title": title_text or title_type, "paragraphs": fallback, "rewards": []}]
 
             # 智能判断 block 类型（基于内容和标题关键词）
             # 1. 检查是否包含奖励数据

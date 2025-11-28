@@ -6,6 +6,20 @@ export type ImageMeta = {
   mime?: string; // MIME 类型（image/png 等）
 };
 
+// 文本片段（对应一个 Excel 单元格或合并单元格）
+export type TextRun = {
+  text: string; // 文本内容
+  bold?: boolean; // 加粗
+  italic?: boolean; // 斜体
+  color?: string; // 文字颜色（如 "#FF0000"）
+};
+
+// 段落（对应 Excel 的一行）
+export type Paragraph = {
+  align?: "left" | "center" | "right"; // 对齐方式
+  runs: TextRun[]; // 文本片段数组（通常每行一个单元格对应一个 run）
+};
+
 export type Reward = {
   name?: string;
   image?: string | ImageMeta; // 支持向后兼容：字符串或新的元数据对象
@@ -31,7 +45,8 @@ export type TableData = {
 
 export type Section = {
   title?: string;
-  content?: string;
+  content?: string; // 旧格式（向后兼容）
+  paragraphs?: Paragraph[]; // 新格式：结构化段落数组
   rewards?: Reward[];
   table?: TableData; // 新增：表格数据
   // 展平后保留的 block 元数据
@@ -66,6 +81,8 @@ export type StyleCfg = {
     image?: string; // data/http/file
     slice: { t: number; r: number; b: number; l: number };
   };
+  blockTitleBg?: string; // 大标题背景（TITLE-）
+  sectionTitleBg?: string; // 小标题背景（RULES-/RANK-）
   font: {
     family: string;
     size: number;
