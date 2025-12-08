@@ -116,28 +116,6 @@ uv sync --extra production
 
 这会安装所有依赖，包括 Gunicorn（生产级 WSGI 服务器）。
 
-### 2.2.1 配置环境变量
-
-创建 `.env` 文件并配置 TinyPNG API Key：
-
-```bash
-cd /opt/activity-rule-editor
-cp .env.example .env  # 如果存在 .env.example
-# 或直接创建 .env 文件
-nano .env
-```
-
-在 `.env` 文件中添加：
-
-```env
-TINYPNG_API_KEY=your_tinypng_api_key_here
-```
-
-**获取 TinyPNG API Key：**
-1. 访问 https://tinypng.com/developers
-2. 注册账号并获取 API Key
-3. 将 API Key 填入 `.env` 文件
-
 ### 2.3 前端静态文件
 
 **重要：** 前端需要在本地开发环境构建，构建后的静态文件会提交到版本控制。

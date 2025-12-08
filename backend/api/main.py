@@ -9,17 +9,12 @@ import tempfile
 import uvicorn
 import io
 import base64
-import os
-from dotenv import load_dotenv
 from openpyxl import load_workbook
 from PIL import Image
 
 from backend.services.excel_parser import parse_file
 from backend.services.image_extractor import extract_images_for_result
 from backend.services import blob_store as blob_service
-
-# 加载环境变量
-load_dotenv()
 
 # 获取项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -147,15 +142,8 @@ async def compress_image(
     try:
         import tinify
 
-        # TinyPNG API Key from environment variable
-        tinypng_api_key = os.getenv("TINYPNG_API_KEY")
-        if not tinypng_api_key:
-            return JSONResponse({
-                "ok": False,
-                "error": "TINYPNG_API_KEY environment variable is not set",
-            }, status_code=500)
-
-        tinify.key = tinypng_api_key
+        # TinyPNG API Key
+        tinify.key = "Ynm23lfzc5V5dDgTv7h8Lcx2rR5pHwhG"
 
         # 解析 base64 数据
         if image_data.startswith("data:"):

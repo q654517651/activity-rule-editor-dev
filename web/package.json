@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "VITE_API_BASE='/activity-rule-editor' tsc && vite build",
+    "build": "tsc && vite build",
     "lint": "eslint --fix",
     "preview": "vite preview"
   },

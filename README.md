@@ -54,10 +54,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 安装依赖（uv 会自动创建虚拟环境）
 uv sync
 
-# 配置环境变量（复制 .env.example 为 .env 并填入你的 TinyPNG API Key）
-cp .env.example .env
-# 编辑 .env 文件，设置 TINYPNG_API_KEY
-
 # 启动 API 服务器
 uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
