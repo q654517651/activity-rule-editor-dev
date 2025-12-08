@@ -12,12 +12,14 @@ function OffscreenExporter({
   style,
   pixelRatio,
   knownHeight,
+  tableImageSize,
   onDone,
 }: {
   page: Page;
   style: StyleCfg;
   pixelRatio: number;
   knownHeight?: number;
+  tableImageSize?: number;
   onDone: (dataUrl: string) => void;
 }) {
   const stageRef = useRef<any>(null);
@@ -57,7 +59,8 @@ function OffscreenExporter({
         <PageCanvas 
           forExport 
           page={page} 
-          style={style} 
+          style={style}
+          tableImageSize={tableImageSize}
           onMeasured={knownHeight ? undefined : handleMeasured}
         />
       </Layer>
@@ -70,6 +73,7 @@ export async function renderPageToDataURL(
   style: StyleCfg,
   pixelRatio = 2,
   knownHeight?: number,
+  tableImageSize?: number,
 ): Promise<string> {
   const container = document.createElement("div");
   const root = ReactDOM.createRoot(container);
@@ -83,6 +87,7 @@ export async function renderPageToDataURL(
         pixelRatio={pixelRatio}
         style={style}
         knownHeight={knownHeight}
+        tableImageSize={tableImageSize}
         onDone={handleDone}
       />,
     );
@@ -98,6 +103,7 @@ export async function exportPagesToPng(
   style: StyleCfg,
   pixelRatio = 2,
   knownHeights?: number[],
+  tableImageSize?: number,
   onProgress?: (progress: ExportProgress) => void,
 ) {
   const out: Array<{ name: string; dataUrl: string }> = [];
@@ -106,7 +112,7 @@ export async function exportPagesToPng(
   for (let i = 0; i < total; i++) {
     const page = data.pages[i];
     const knownHeight = knownHeights?.[i];
-    const dataUrl = await renderPageToDataURL(page, style, pixelRatio, knownHeight);
+    const dataUrl = await renderPageToDataURL(page, style, pixelRatio, knownHeight, tableImageSize);
 
     // 使用 page.region 作为文件名，与单张下载保持一致
     const regionName = page.region || `page-${i + 1}`;

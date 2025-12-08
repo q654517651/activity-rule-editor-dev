@@ -71,8 +71,12 @@ export function TableComponent({
   // 追踪图片加载完成数量，用于强制触发高度更新
   const [loadedImageCount, setLoadedImageCount] = useState(0);
 
+  // 标记是否正在重新测量（避免在清空缓存后立即报告不准确的高度）
+  const [isMeasuring, setIsMeasuring] = useState(false);
+
   // 当影响高度的属性变化时，清空测量缓存并重置重试计数
   useEffect(() => {
+    setIsMeasuring(true); // 标记为正在测量
     setCellHeights(new Map());
     retryCountRef.current = 0;
   }, [fontSize, table, width, fontFamily, maxImageHeight]);
@@ -149,18 +153,18 @@ export function TableComponent({
     loadImages();
   }, [table]);
 
-  // 计算列数：从第一行推断总列数（考虑 colspan）
+  // 计算列数：遍历所有行，找出最大列数（支持不同行有不同列数）
   let colCount = 0;
 
-  if (table.rows.length > 0) {
-    const firstRow = table.rows[0];
-
-    for (const cell of firstRow) {
-      colCount += cell.colspan || 1;
+  for (const row of table.rows) {
+    let rowColCount = 0;
+    for (const cell of row) {
+      rowColCount += cell.colspan || 1;
     }
+    colCount = Math.max(colCount, rowColCount);
   }
 
-  const colWidth = width / colCount;
+  const colWidth = width / Math.max(colCount, 1); // 防止除以0
   const cellPadding = 8;
   const minRowHeight = fontSize * 2;
   const textAlign = direction === "rtl" ? "right" : "left";
@@ -232,8 +236,18 @@ export function TableComponent({
   }, [table.rows, colCount]);
 
   // 测量所有单元格的实际高度（使用 RAF 确保 Konva 渲染完成）
+  // 大表格优化：超过50行时跳过逐单元格测量，直接使用统一高度
   useLayoutEffect(() => {
+    const isLargeTable = table.rows.length > 50;
+    
+    // 大表格直接标记为测量完成，使用统一高度
+    if (isLargeTable) {
+      setIsMeasuring(false);
+      return;
+    }
+    
     let cancelled = false;
+    let retryRafId: number | null = null;
 
     const measure = () => {
       if (cancelled) return;
@@ -241,6 +255,7 @@ export function TableComponent({
       const newHeights = new Map<string, number>();
       let hasChanges = false;
       let hasUnmeasured = false;
+      let measuredCount = 0;
 
       // 测量文本节点
       textRefs.current.forEach((textNode, key) => {
@@ -249,6 +264,7 @@ export function TableComponent({
 
           if (height > 0) {
             newHeights.set(key, height);
+            measuredCount++;
             if (!cellHeights.has(key) || cellHeights.get(key) !== height) {
               hasChanges = true;
             }
@@ -266,6 +282,7 @@ export function TableComponent({
 
           if (height > 0) {
             newHeights.set(key, height);
+            measuredCount++;
             if (!cellHeights.has(key) || cellHeights.get(key) !== height) {
               hasChanges = true;
             }
@@ -282,9 +299,13 @@ export function TableComponent({
       }
 
       // 如果有未测量的节点，且未超过最大重试次数，用 RAF 重试
-      if (hasUnmeasured && retryCountRef.current < maxRetries) {
+      if (hasUnmeasured && retryCountRef.current < maxRetries && !cancelled) {
         retryCountRef.current++;
-        requestAnimationFrame(measure);
+        // 关键：追踪递归RAF，以便清理
+        retryRafId = requestAnimationFrame(measure);
+      } else if (measuredCount > 0) {
+        // 测量完成，清除正在测量的标记
+        setIsMeasuring(false);
       }
     };
 
@@ -294,48 +315,42 @@ export function TableComponent({
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafId);
+      // 关键：取消递归创建的RAF
+      if (retryRafId != null) {
+        cancelAnimationFrame(retryRafId);
+      }
     };
   }, [loadedImageCount, fontSize, table, width, fontFamily, maxImageHeight]); // 依赖所有影响高度的属性
 
-  // 移除了表头高度计算（没有表头概念了）
-
-  // 计算所有数据行的统一高度（找出整个表格中最高的单元格）
-  const getUnifiedDataRowHeight = () => {
+  // 计算每一行的独立高度（根据该行中最高的单元格）
+  const getRowHeight = (rowIdx: number): number => {
+    const row = table.rows[rowIdx];
     let maxHeight = minRowHeight;
     let hasMeasuredCells = false;
 
-    // 遍历所有数据行的所有单元格，找出最大高度
-    for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
-      for (let colIdx = 0; colIdx < colCount; colIdx++) {
-        const key = `${rowIdx}-${colIdx}`;
-        const cellHeight = cellHeights.get(key);
+    // 遍历该行的所有单元格，找出最大高度
+    for (let cellIdx = 0; cellIdx < row.length; cellIdx++) {
+      const key = `${rowIdx}-${cellIdx}`;
+      const cellHeight = cellHeights.get(key);
 
-        if (cellHeight && cellHeight > 0) {
-          hasMeasuredCells = true;
-          if (cellHeight > maxHeight) {
-            maxHeight = cellHeight;
-          }
-        }
+      if (cellHeight && cellHeight > 0) {
+        hasMeasuredCells = true;
+        maxHeight = Math.max(maxHeight, cellHeight);
       }
     }
 
-    // 如果还没有测量到任何单元格，使用更合理的初始估算
+    // 如果还没有测量到该行的单元格，使用估算
     if (!hasMeasuredCells) {
-      // 检查是否有图片单元格
+      // 检查该行是否有图片单元格
       let hasImages = false;
-
-      for (const row of table.rows) {
-        for (const cell of row) {
-          if (cell.is_image) {
-            hasImages = true;
-            break;
-          }
+      for (const cell of row) {
+        if (cell.is_image) {
+          hasImages = true;
+          break;
         }
-        if (hasImages) break;
       }
 
-      // 如果有图片，使用图片最大高度估算
-      // 否则使用文本估算
+      // 如果有图片，使用图片最大高度估算；否则使用文本估算
       maxHeight = hasImages ? maxImageHeight : minRowHeight;
     }
 
@@ -343,21 +358,22 @@ export function TableComponent({
     return maxHeight + cellPadding * 2;
   };
 
-  const unifiedDataRowHeight = getUnifiedDataRowHeight(); // 所有行使用同一个统一高度
-
-  // 计算每行的 Y 坐标（所有行使用统一高度，从 0 开始）
+  // 计算每行的 Y 坐标和高度（每行独立计算高度）
   const rowPositions: Array<{ y: number; height: number }> = [];
   let currentY = 0;
 
   for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
-    rowPositions.push({ y: currentY, height: unifiedDataRowHeight });
-    currentY += unifiedDataRowHeight;
+    const rowHeight = getRowHeight(rowIdx);
+    rowPositions.push({ y: currentY, height: rowHeight });
+    currentY += rowHeight;
   }
 
   const totalHeight = currentY;
 
   // 通知父组件总高度 - 只依赖 totalHeight，确保每次高度变化都会通知
   const onHeightMeasuredRef = useRef(onHeightMeasured);
+  const lastReportedHeightRef = useRef<number | null>(null);
+  const heightStabilityTimerRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     onHeightMeasuredRef.current = onHeightMeasured;
@@ -365,16 +381,36 @@ export function TableComponent({
 
   useLayoutEffect(() => {
     if (!onHeightMeasuredRef.current || totalHeight <= 0) return;
+    
+    // 如果正在测量中，不报告（等待测量完成）
+    if (isMeasuring) return;
+    
+    // 如果高度没有实际变化，不报告
+    if (lastReportedHeightRef.current !== null && 
+        Math.abs(lastReportedHeightRef.current - totalHeight) < 1) {
+      return;
+    }
 
-    // 使用 requestAnimationFrame 确保DOM已经更新完成
-    const rafId = requestAnimationFrame(() => {
-      if (onHeightMeasuredRef.current) {
+    // 清除之前的定时器
+    if (heightStabilityTimerRef.current != null) {
+      clearTimeout(heightStabilityTimerRef.current);
+    }
+
+    // 使用短延迟确保高度稳定后再报告（避免连续变化时的抖动）
+    heightStabilityTimerRef.current = window.setTimeout(() => {
+      if (onHeightMeasuredRef.current && totalHeight > 0) {
+        lastReportedHeightRef.current = totalHeight;
         onHeightMeasuredRef.current(totalHeight);
       }
-    });
+      heightStabilityTimerRef.current = null;
+    }, 50); // 50ms 的稳定检测
 
-    return () => cancelAnimationFrame(rafId);
-  }, [totalHeight]); // 只依赖最终高度，中间变量的变化会自然反映在 totalHeight 上
+    return () => {
+      if (heightStabilityTimerRef.current != null) {
+        clearTimeout(heightStabilityTimerRef.current);
+      }
+    };
+  }, [totalHeight, isMeasuring]); // 依赖高度和测量状态
 
   return (
     <Group x={x} y={y}>

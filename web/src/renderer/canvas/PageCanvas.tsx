@@ -13,7 +13,7 @@ import { Group, Image as KImage, Text, Rect } from "react-konva";
 
 import { loadBitmap } from "./useImageCache";
 import { NineSlice } from "./nineSlice";
-import { TableComponent } from "./TableComponent";
+import { TableComponentShape } from "./TableComponentShape";
 import { ParagraphComponent } from "./ParagraphComponent";
 // Konva Text 组件的 direction 属性类型已在 konva-extensions.d.ts 中扩展
 
@@ -392,6 +392,7 @@ export function PageCanvas({
   onMeasured,
   onTextClick,
   onImageClick,
+  onTableClick,
   tableImageSize = 120,
 }: {
   page: Page;
@@ -410,6 +411,10 @@ export function PageCanvas({
   onImageClick?: (info: {
     path: string; // 如 "blocks.0.sections.1.rewards.0.image"
     currentImage?: string;
+  }) => void;
+  onTableClick?: (info: {
+    path: string; // 如 "sections.0.table"
+    table: any;
   }) => void;
   tableImageSize?: number; // 表格图片大小，默认 120
 }) {
@@ -659,26 +664,50 @@ export function PageCanvas({
   const innerH = sectionsH;
   const H = PAD.t + innerH + PAD.b;
 
-  // 防止无限循环：只在高度确实变化时上报，且用 RAF 合批
+  // 防止无限循环：只在高度确实变化时上报
+  // 使用稳定性检测：等待高度稳定后再上报，避免多表格竞态条件
   const lastReportedRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
+  const stabilityTimerRef = useRef<number | null>(null);
+  const pendingHeightRef = useRef<number | null>(null);
+  const stabilityDelay = 100; // 等待 100ms 确认高度稳定
 
   const reportHeight = useCallback(
     (h: number) => {
       if (!Number.isFinite(h) || h <= 0) return;
-      // 变化小于 1px 视为相同，不上报
-      if (
-        lastReportedRef.current !== null &&
-        Math.abs(lastReportedRef.current - h) < 1
-      )
-        return;
+      
+      // 记录待上报的高度
+      pendingHeightRef.current = h;
+      
+      // 清除之前的稳定性检测定时器
+      if (stabilityTimerRef.current != null) {
+        clearTimeout(stabilityTimerRef.current);
+      }
+      
+      // 设置稳定性检测：如果 100ms 内没有新的高度变化，才上报
+      stabilityTimerRef.current = window.setTimeout(() => {
+        const finalHeight = pendingHeightRef.current;
+        if (finalHeight == null || !Number.isFinite(finalHeight)) return;
+        
+        // 变化小于 1px 视为相同，不上报
+        if (
+          lastReportedRef.current !== null &&
+          Math.abs(lastReportedRef.current - finalHeight) < 1
+        ) {
+          return;
+        }
 
-      lastReportedRef.current = h;
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => {
-        onMeasured?.(h);
-        rafRef.current = null;
-      });
+        lastReportedRef.current = finalHeight;
+        
+        // 使用 RAF 确保在下一帧渲染
+        if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+        rafRef.current = requestAnimationFrame(() => {
+          onMeasured?.(finalHeight);
+          rafRef.current = null;
+        });
+        
+        stabilityTimerRef.current = null;
+      }, stabilityDelay);
     },
     [onMeasured],
   );
@@ -690,6 +719,7 @@ export function PageCanvas({
   useEffect(() => {
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      if (stabilityTimerRef.current != null) clearTimeout(stabilityTimerRef.current);
     };
   }, []);
 
@@ -1069,7 +1099,7 @@ export function PageCanvas({
 
             {/* Section 表格 */}
             {s.section.table ? (
-              <TableComponent
+              <TableComponentShape
                 contentColor={style.contentColor}
                 direction={direction}
                 fontFamily={style.font.family}
@@ -1096,24 +1126,11 @@ export function PageCanvas({
                     return prev;
                   });
                 }}
-                onImageClick={(rowIdx, colIdx, currentImage) => {
-                  if (!forExport && onImageClick) {
-                    onImageClick({
-                      path: `sections.${sectionIdx}.table.rows.${rowIdx}.${colIdx}.image`,
-                      currentImage,
-                    });
-                  }
-                }}
-                onTextClick={(rowIdx, colIdx, value) => {
-                  if (!forExport && onTextClick) {
-                    onTextClick({
-                      path: `sections.${sectionIdx}.table.rows.${rowIdx}.${colIdx}.value`,
-                      value,
-                      position: { x: contentX, y: tableY },
-                      width: contentW,
-                      height: style.font.size * style.font.lineHeight,
-                      fontSize: style.font.size,
-                      multiline: false,
+                onTableClick={(table) => {
+                  if (!forExport && onTableClick) {
+                    onTableClick({
+                      path: `sections.${sectionIdx}.table`,
+                      table,
                     });
                   }
                 }}

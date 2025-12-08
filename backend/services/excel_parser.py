@@ -221,26 +221,49 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
         TABLE- 标记后的所有行都是表格内容（没有表头概念）
         直到下一个 TABLE- 或其他标记为止
         支持文字和图片、居中、加粗等格式
+        
+        重要：使用 TABLE- 标记所在行的合并单元格范围作为表格列范围
         """
         table_data = {
             "type": "table",
             "rows": []
         }
         
+        # 查找 TABLE- 标记的实际列范围（使用合并单元格范围）
+        table_c1 = c1
+        table_c2 = c2
+        
+        # 检查 TABLE- 标记所在的单元格是否有合并
+        rv_table_marker = row_region_values(ws, r0, c1, c2, merge_idx)
+        for col_idx, val in enumerate(rv_table_marker):
+            if val.startswith("TABLE-"):
+                actual_col = c1 + col_idx
+                # 检查该单元格是否在合并区域中
+                if (r0, actual_col) in merge_idx:
+                    min_r, min_c, max_r, max_c = merge_idx[(r0, actual_col)]
+                    # 使用合并区域的列范围（跳过标记列本身，从下一列开始）
+                    table_c1 = min_c + 1 if min_c == c1 else min_c
+                    table_c2 = max_c
+                else:
+                    # 如果 TABLE- 在第一列，表格从第二列开始到 region 结束
+                    table_c1 = c1 + 1
+                    table_c2 = c2
+                break
+        
         rr = r0 + 1  # 跳过 TABLE- 标记行，从下一行开始是表格内容
         
         # 所有行都是数据行（没有表头）
         while rr <= r_end:
-            rv = row_region_values(ws, rr, c1, c2, merge_idx)
-            
-            # 检查第一列（标记列）是否有新的块级标记
-            # 注意：不检查 RULES-，因为表格可能在 RULES- 区域内部（合并单元格导致第一列是 RULES-）
-            first = rv[0] if rv else ""
-            if first and (first.startswith("TITLE-") or first.startswith("RINK-") or first.startswith("RANK-")):
+            # 检查标记列（c1）是否有新的块级标记
+            marker_col_val = clean_text(get_value(ws, rr, c1, merge_idx))
+            if marker_col_val and (marker_col_val.startswith("TITLE-") or marker_col_val.startswith("RINK-") or marker_col_val.startswith("RANK-")):
                 break
             
+            # 使用表格的实际列范围获取数据
+            rv = row_region_values(ws, rr, table_c1, table_c2, merge_idx)
+            
             # 检查内容列是否有 TABLE- 结束标记
-            has_table_in_content = any(val.startswith("TABLE-") for val in rv[1:] if val)
+            has_table_in_content = any(val.startswith("TABLE-") for val in rv if val)
             if has_table_in_content:
                 break
             
@@ -251,24 +274,20 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
             # 如果是空行，检查下一行是否也是空行或有标记
             # 连续两个空行才停止（避免表格中间的单个空行被跳过）
             if is_empty_row and rr + 1 <= r_end:
-                next_rv = row_region_values(ws, rr + 1, c1, c2, merge_idx)
-                next_first = next_rv[0] if next_rv else ""
-                # 如果下一行是空行或者是标记行，则停止
-                if is_row_blank(next_rv) or next_first.startswith("TITLE-") or next_first.startswith("RINK-") or next_first.startswith("RANK-"):
+                next_marker = clean_text(get_value(ws, rr + 1, c1, merge_idx))
+                next_rv = row_region_values(ws, rr + 1, table_c1, table_c2, merge_idx)
+                # 如果下一行是空行或者标记列有标记，则停止
+                if is_row_blank(next_rv) or (next_marker and (next_marker.startswith("TITLE-") or next_marker.startswith("RINK-") or next_marker.startswith("RANK-"))):
                     break
             
-            # 收集这一行的数据（跳过第一列标记列，只收集后续列）
+            # 收集这一行的数据（表格范围内的所有列）
             row_data = []
-            col_output_idx = 0  # 输出列索引（不包括标记列）
+            col_output_idx = 0  # 输出列索引
             
             for col_idx, val in enumerate(rv):
-                # 跳过第一列（标记列）
-                if col_idx == 0:
-                    continue
-                
                 # 检查当前单元格是否在合并区域内
                 actual_row = rr
-                actual_col = c1 + col_idx
+                actual_col = table_c1 + col_idx  # 使用表格的起始列
                 rowspan = 1
                 colspan = 1
                 is_merged_child = False
@@ -332,8 +351,8 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
         
         # 如果当前行的内容列包含 TABLE- 结束标记，跳过它
         if rr <= r_end:
-            rv_check = row_region_values(ws, rr, c1, c2, merge_idx)
-            has_table_end = any(val.startswith("TABLE-") for val in rv_check[1:] if val)
+            rv_check = row_region_values(ws, rr, table_c1, table_c2, merge_idx)
+            has_table_end = any(val.startswith("TABLE-") for val in rv_check if val)
             if has_table_end:
                 rr += 1
         

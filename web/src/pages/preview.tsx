@@ -32,6 +32,7 @@ import { savePngsMultiSheet } from "@/utils/file";
 import { convertImageFormat, compressImage } from "@/utils/image";
 import { DragDropZone } from "@/components/DragDropZone";
 import { ImageUploadModal } from "@/components/ImageUploadModal";
+import { TableEditModal } from "@/components/TableEditModal";
 import { TextEditModal } from "@/components/TextEditModal";
 import {
   DownloadHistory,
@@ -104,6 +105,7 @@ const CanvasCell = memo(
     onDownload,
     onTextClick,
     onImageClick,
+    onTableClick,
     tableImageSize,
   }: {
     page: Page;
@@ -114,6 +116,7 @@ const CanvasCell = memo(
     onDownload: (type: "original" | "tinypng", format: "png" | "webp") => void;
     onTextClick: (info: any) => void;
     onImageClick: (info: any) => void;
+    onTableClick: (info: any) => void;
     tableImageSize: number;
   }) {
     // 固定基准尺寸
@@ -137,7 +140,7 @@ const CanvasCell = memo(
       onMeasured(h); // 同时通知父组件
     }, [onMeasured]);
     
-    // 高度变化动画
+    // 高度变化动画 - 添加取消机制避免快速连续变化时的冲突
     useEffect(() => {
       const startH = animatedScaledH;
       const endH = targetScaledH;
@@ -149,10 +152,14 @@ const CanvasCell = memo(
         return;
       }
       
-      const duration = 400; // 动画时长 400ms
+      const duration = 300; // 缩短动画时长到 300ms，减少快速变化时的延迟感
       const startTime = performance.now();
+      let rafId: number | null = null;
+      let cancelled = false;
       
       const animate = (currentTime: number) => {
+        if (cancelled) return;
+        
         const elapsed = currentTime - startTime;
         const progress = Math.min(elapsed / duration, 1);
         
@@ -162,12 +169,20 @@ const CanvasCell = memo(
         
         setAnimatedScaledH(Math.round(currentH));
         
-        if (progress < 1) {
-          requestAnimationFrame(animate);
+        if (progress < 1 && !cancelled) {
+          rafId = requestAnimationFrame(animate);
         }
       };
       
-      requestAnimationFrame(animate);
+      rafId = requestAnimationFrame(animate);
+      
+      // 清理函数：取消正在进行的动画
+      return () => {
+        cancelled = true;
+        if (rafId != null) {
+          cancelAnimationFrame(rafId);
+        }
+      };
     }, [targetScaledH]); // 依赖目标高度
 
     // 使用 Intersection Observer 检测可见性
@@ -244,13 +259,17 @@ const CanvasCell = memo(
               style={{ position: "absolute", inset: 0 }}
               width={baseWidth}
             >
-              <Layer listening={true} perfectDrawEnabled={false}>
+              <Layer 
+                listening={true}
+                perfectDrawEnabled={false}
+              >
                 <PageCanvas
                   page={page}
                   style={style}
                   tableImageSize={tableImageSize}
                   onImageClick={onImageClick}
                   onMeasured={handleMeasured}
+                  onTableClick={(info) => onTableClick(info)}
                   onTextClick={(info) => onTextClick(info)}
                 />
               </Layer>
@@ -402,6 +421,12 @@ export default function PreviewPage() {
     pageIndex: number;
     path: string;
     currentImage?: string;
+  } | null>(null);
+
+  const [editingTable, setEditingTable] = useState<{
+    pageIndex: number;
+    path: string;
+    table: any;
   } | null>(null);
 
   // 阶段化导出进度跟踪
@@ -705,6 +730,14 @@ export default function PreviewPage() {
     });
   }, []);
 
+  // 处理表格点击
+  const handleTableClick = useCallback((pageIndex: number, info: any) => {
+    setEditingTable({
+      pageIndex,
+      ...info,
+    });
+  }, []);
+
   // 通用路径设置函数：处理所有边界情况
   const setValueByPath = useCallback((root: any, path: string, value: any) => {
     const parts = path.split(".");
@@ -911,6 +944,61 @@ export default function PreviewPage() {
     [editingImage, data, allSheets, currentSheet, setValueByPath],
   );
 
+  // 保存表格编辑
+  const handleTableSave = useCallback(
+    (updatedTable: any) => {
+      if (!editingTable) return;
+
+      const newData = JSON.parse(JSON.stringify(data));
+      const page = newData.pages[editingTable.pageIndex];
+      const pathParts = editingTable.path.split(".");
+
+      // 使用通用的路径设置函数
+      if (page.blocks && pathParts[0] === "sections") {
+        const sectionIdx = Number(pathParts[1]);
+
+        // 找到这个 section 属于哪个 block
+        let currentSectionCount = 0;
+        for (let blockIdx = 0; blockIdx < page.blocks.length; blockIdx++) {
+          const block = page.blocks[blockIdx];
+          const sectionsInBlock = block.sections.length;
+
+          if (currentSectionCount + sectionsInBlock > sectionIdx) {
+            // 找到了对应的 block
+            const sectionInBlockIdx = sectionIdx - currentSectionCount;
+
+            // 构建相对路径（从 section 开始）
+            const relativeParts = pathParts.slice(2); // 跳过 "sections" 和索引
+            const relativePath = relativeParts.join(".");
+            
+            // 在对应的 section 上设置值
+            setValueByPath(
+              block.sections[sectionInBlockIdx],
+              relativePath,
+              updatedTable
+            );
+            break;
+          }
+          currentSectionCount += sectionsInBlock;
+        }
+      } else {
+        // 旧结构或直接 sections，直接使用完整路径
+        setValueByPath(page, editingTable.path, updatedTable);
+      }
+
+      setData(newData);
+
+      // 同步到 allSheets
+      const newSheets = new Map(allSheets);
+      newSheets.set(currentSheet, newData);
+      setAllSheets(newSheets);
+
+      setEditingTable(null);
+      console.log("✓ 表格已保存");
+    },
+    [editingTable, data, allSheets, currentSheet, setValueByPath],
+  );
+
   // 处理单个图片下载
   const processImageDownload = useCallback(
     async (
@@ -951,6 +1039,7 @@ export default function PreviewPage() {
           debouncedStyle,
           pixelRatio,
           knownHeight,
+          tableImageSize,
         );
 
         // 使用 page.region 作为文件名
@@ -1100,6 +1189,7 @@ export default function PreviewPage() {
           debouncedStyle,
           pixelRatio,
           sheetHeights,
+          tableImageSize,
           (progress: ExportProgress) => {
             if (progress.phase === "render") {
               setRenderCurr(currentPage + progress.current);
@@ -1845,6 +1935,7 @@ export default function PreviewPage() {
                 onDownload={(type, format) => onDownloadPage(index, type, format)}
                 onImageClick={(info) => handleImageClick(index, info)}
                 onMeasured={onMeasuredByIndex(index)}
+                onTableClick={(info) => handleTableClick(index, info)}
                 onTextClick={(info) => handleTextClick(index, info)}
               />
             ))}
@@ -1871,6 +1962,14 @@ export default function PreviewPage() {
         isOpen={!!editingImage}
         onClose={() => setEditingImage(null)}
         onSave={handleImageSave}
+      />
+
+      {/* 表格编辑弹窗 */}
+      <TableEditModal
+        isOpen={!!editingTable}
+        table={editingTable?.table || null}
+        onClose={() => setEditingTable(null)}
+        onSave={handleTableSave}
       />
 
       {/* 下载历史组件 */}
