@@ -160,6 +160,7 @@ export function TableComponentShape({
   const colWidth = width / colCount;
   
   // 批量加载所有图片（只setState一次）
+  // 注意：由于 PageCanvas 已经预加载，这里的 loadBitmap 调用会复用已有的 Promise，不会重复请求
   useEffect(() => {
     const loadImages = async () => {
       const imagesToLoad: Array<{ key: string; url: string }> = [];
@@ -178,7 +179,7 @@ export function TableComponentShape({
         }
       }
       
-      // 并行加载所有图片
+      // 并行加载所有图片（loadBitmap 内部已去重，会复用 PageCanvas 的预加载）
       const results = await Promise.allSettled(
         imagesToLoad.map(async ({ key, url }) => {
           try {
@@ -198,7 +199,7 @@ export function TableComponentShape({
         }
       });
       
-      // 只setState一次
+      // 只setState一次，触发重绘
       setLoadedImages(newImages);
     };
     
@@ -383,7 +384,9 @@ export function TableComponentShape({
         if (cell.is_image) {
           const key = `${layout.rowIdx}-${layout.cellIdx}`;
           const img = loadedImages.get(key);
+          
           if (img) {
+            // 绘制实际图片
             const maxImgW = cellW - cellPadding * 2;
             const maxImgH = Math.min(cellH - cellPadding * 2, maxImageHeight);
             
@@ -400,6 +403,23 @@ export function TableComponentShape({
             const imgY = cellY + (cellH - imgH) / 2;
             
             ctx.drawImage(img as any, imgX, imgY, imgW, imgH);
+          } else {
+            // 图片未加载完成，显示占位符
+            const maxImgW = cellW - cellPadding * 2;
+            const maxImgH = Math.min(cellH - cellPadding * 2, maxImageHeight);
+            
+            // 绘制灰色占位背景
+            ctx.fillStyle = "#f0f0f0";
+            const placeholderX = cellX + cellPadding;
+            const placeholderY = cellY + (cellH - maxImgH) / 2;
+            ctx.fillRect(placeholderX, placeholderY, maxImgW, maxImgH);
+            
+            // 绘制 Loading 文字
+            ctx.fillStyle = "#999";
+            ctx.font = `${fontSize * 0.8}px ${fontFamily}`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("Loading...", cellX + cellW / 2, cellY + cellH / 2);
           }
         } else if (lines && lines.length > 0) {
           // 绘制文字

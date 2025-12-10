@@ -1,6 +1,9 @@
 /* Image cache that decodes to ImageBitmap (if available) */
 const cache = new Map<string, ImageBitmap | HTMLImageElement>();
 
+/* 正在加载的 Promise 缓存 - 防止同一图片重复加载 */
+const loadingPromises = new Map<string, Promise<ImageBitmap | HTMLImageElement | null>>();
+
 // 并发控制队列
 class RequestQueue {
   private queue: Array<() => Promise<void>> = [];
@@ -154,61 +157,100 @@ export async function loadBitmap(
   // 规范化 URL（转换相对地址为完整地址）
   const normalizedUrl = normalizeImageUrl(url);
 
-  if (cache.has(normalizedUrl)) return cache.get(normalizedUrl)!;
+  // 1. 检查已完成的缓存
+  if (cache.has(normalizedUrl)) {
+    return cache.get(normalizedUrl)!;
+  }
 
-  try {
-    // 使用队列控制并发
-    const bmp = await requestQueue.add(async () => {
-      let result: ImageBitmap | HTMLImageElement;
+  // 2. 检查正在加载的 Promise - 复用，避免重复请求
+  if (loadingPromises.has(normalizedUrl)) {
+    return loadingPromises.get(normalizedUrl)!;
+  }
 
-      // 对于跨源请求（http/https）或需要通过 fetch 的 URL
-      if (
-        normalizedUrl.startsWith("blob:") ||
-        normalizedUrl.startsWith("http") ||
-        normalizedUrl.startsWith("data:") ||
-        normalizedUrl.startsWith("file:")
-      ) {
-        const blob = await fetchAsBlob(normalizedUrl);
+  // 3. 创建加载 Promise 并缓存
+  const loadPromise = (async () => {
+    try {
+      // 使用队列控制并发
+      const bmp = await requestQueue.add(async () => {
+        let result: ImageBitmap | HTMLImageElement;
 
-        if ("createImageBitmap" in window) {
-          result = await createImageBitmap(blob);
+        // 对于跨源请求（http/https）或需要通过 fetch 的 URL
+        if (
+          normalizedUrl.startsWith("blob:") ||
+          normalizedUrl.startsWith("http") ||
+          normalizedUrl.startsWith("data:") ||
+          normalizedUrl.startsWith("file:")
+        ) {
+          const blob = await fetchAsBlob(normalizedUrl);
+
+          if ("createImageBitmap" in window) {
+            result = await createImageBitmap(blob);
+          } else {
+            const img = new Image();
+
+            img.crossOrigin = "anonymous";
+            img.src = URL.createObjectURL(blob);
+            await new Promise<void>((res, rej) => {
+              img.onload = () => res();
+              img.onerror = () => rej(new Error("image load error"));
+            });
+            result = img;
+          }
         } else {
+          // 本地资源（应该不会走到这里，但保留作备份）
           const img = new Image();
 
           img.crossOrigin = "anonymous";
-          img.src = URL.createObjectURL(blob);
+          img.src = normalizedUrl;
           await new Promise<void>((res, rej) => {
             img.onload = () => res();
             img.onerror = () => rej(new Error("image load error"));
           });
           result = img;
         }
-      } else {
-        // 本地资源（应该不会走到这里，但保留作备份）
-        const img = new Image();
 
-        img.crossOrigin = "anonymous";
-        img.src = normalizedUrl;
-        await new Promise<void>((res, rej) => {
-          img.onload = () => res();
-          img.onerror = () => rej(new Error("image load error"));
-        });
-        result = img;
-      }
+        return result;
+      });
 
-      return result;
-    });
+      // 加载成功，缓存结果
+      cache.set(normalizedUrl, bmp);
+      return bmp;
+    } catch (err) {
+      console.error(`[loadBitmap] 加载失败 ${normalizedUrl}:`, err);
+      return null;
+    } finally {
+      // 加载完成（成功或失败），移除 loading Promise
+      loadingPromises.delete(normalizedUrl);
+    }
+  })();
 
-    cache.set(normalizedUrl, bmp);
-
-    return bmp;
-  } catch (err) {
-    console.error(`[loadBitmap] 加载失败 ${normalizedUrl}:`, err);
-
-    return null;
-  }
+  // 缓存正在加载的 Promise
+  loadingPromises.set(normalizedUrl, loadPromise);
+  
+  return loadPromise;
 }
 
 export function clearImageCache() {
   cache.clear();
+  loadingPromises.clear();
+}
+
+/**
+ * 检查图片是否已缓存（同步）
+ * 组件可以用这个检查是否显示占位符
+ */
+export function isImageCached(url?: string): boolean {
+  if (!url) return false;
+  const normalizedUrl = normalizeImageUrl(url);
+  return cache.has(normalizedUrl);
+}
+
+/**
+ * 从缓存获取图片（同步）
+ * 组件只读缓存，不主动加载
+ */
+export function getCachedImage(url?: string): ImageBitmap | HTMLImageElement | null {
+  if (!url) return null;
+  const normalizedUrl = normalizeImageUrl(url);
+  return cache.get(normalizedUrl) || null;
 }

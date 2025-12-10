@@ -6,10 +6,10 @@ import {
   ModalBody,
   ModalFooter,
   Button,
-  Input,
   Textarea,
 } from "@heroui/react";
 import type { TableData } from "@/renderer/canvas/types";
+import { normalizeImageUrl } from "@/renderer/canvas/useImageCache";
 
 interface TableEditModalProps {
   isOpen: boolean;
@@ -43,6 +43,33 @@ export function TableEditModal({
     const newTable = { ...editedTable };
     newTable.rows[rowIdx][cellIdx].value = value;
     setEditedTable(newTable);
+  };
+
+  // 处理图片上传
+  const handleImageUpload = (rowIdx: number, cellIdx: number, file: File) => {
+    if (!file.type.startsWith("image/")) {
+      alert("请上传图片文件");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      const newTable = { ...editedTable };
+      
+      // 更新图片为 data URL
+      if (typeof newTable.rows[rowIdx][cellIdx].image === "string") {
+        newTable.rows[rowIdx][cellIdx].image = dataUrl;
+      } else {
+        newTable.rows[rowIdx][cellIdx].image = {
+          url: dataUrl,
+          id: `local-${Date.now()}`,
+        };
+      }
+      
+      setEditedTable(newTable);
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleSave = () => {
@@ -98,28 +125,65 @@ export function TableEditModal({
                           {/* 图片单元格 */}
                           {cell.is_image ? (
                             <div className="space-y-2">
-                              <div className="text-sm font-medium text-gray-700">
+                              <div className="text-sm font-medium text-gray-700 mb-2">
                                 图片单元格
                               </div>
-                              {cell.image && (
-                                <img
-                                  alt="表格图片"
-                                  className="max-w-full h-auto max-h-40 object-contain"
-                                  src={
-                                    typeof cell.image === "string"
-                                      ? cell.image
-                                      : cell.image?.url
+                              <div
+                                className="relative border-2 border-dashed rounded-lg p-2 cursor-pointer hover:border-primary transition-colors"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => {
+                                  const input = document.createElement("input");
+                                  input.type = "file";
+                                  input.accept = "image/*";
+                                  input.onchange = (e) => {
+                                    const file = (e.target as HTMLInputElement).files?.[0];
+                                    if (file) {
+                                      handleImageUpload(rowIdx, cellIdx, file);
+                                    }
+                                  };
+                                  input.click();
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    e.currentTarget.click();
                                   }
-                                />
-                              )}
-                              <Input
-                                label="图片URL"
-                                size="sm"
-                                value={cell.value || ""}
-                                onChange={(e) =>
-                                  handleCellChange(rowIdx, cellIdx, e.target.value)
-                                }
-                              />
+                                }}
+                              >
+                                {cell.image ? (
+                                  <div className="relative">
+                                    <img
+                                      alt="表格图片"
+                                      className="max-w-full h-auto max-h-40 object-contain mx-auto"
+                                      src={normalizeImageUrl(
+                                        typeof cell.image === "string"
+                                          ? cell.image
+                                          : cell.image?.url || ""
+                                      )}
+                                      onError={(e) => {
+                                        // 图片加载失败时显示提示
+                                        e.currentTarget.style.display = "none";
+                                        const parent = e.currentTarget.parentElement;
+                                        if (parent && !parent.querySelector(".error-msg")) {
+                                          const errorDiv = document.createElement("div");
+                                          errorDiv.className = "error-msg text-red-500 text-sm text-center p-4";
+                                          errorDiv.textContent = "图片加载失败，点击重新上传";
+                                          parent.appendChild(errorDiv);
+                                        }
+                                      }}
+                                    />
+                                    <div className="absolute bottom-0 right-0 bg-primary text-white text-xs px-2 py-1 rounded-tl opacity-0 hover:opacity-100 transition-opacity">
+                                      点击更换
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="text-center py-8 text-gray-400">
+                                    <div className="text-4xl mb-2">📁</div>
+                                    <p className="text-sm">点击上传图片</p>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           ) : (
                             /* 文本单元格 */

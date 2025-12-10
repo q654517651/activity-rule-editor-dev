@@ -18,6 +18,51 @@ import { ParagraphComponent } from "./ParagraphComponent";
 // Konva Text 组件的 direction 属性类型已在 konva-extensions.d.ts 中扩展
 
 /**
+ * 扫描页面中所有图片 URL（去重）
+ * 用于预加载
+ */
+function collectAllImageUrls(page: Page, style: StyleCfg): string[] {
+  const urlSet = new Set<string>();
+
+  // 1. 扫描样式图片
+  if (style.border.image) urlSet.add(style.border.image);
+  if (style.blockTitleBg) urlSet.add(style.blockTitleBg);
+  if (style.sectionTitleBg) urlSet.add(style.sectionTitleBg);
+
+  // 2. 规范化页面（支持新旧结构）
+  const normalizedPage = normalizePage(page);
+  
+  // 3. 扫描所有 sections
+  for (const section of normalizedPage.sections || []) {
+    // 扫描 rewards
+    for (const reward of section.rewards || []) {
+      if (reward.image) {
+        const url = typeof reward.image === 'string' 
+          ? reward.image 
+          : reward.image?.url;
+        if (url) urlSet.add(url);
+      }
+    }
+    
+    // 扫描 table
+    if (section.table?.rows) {
+      for (const row of section.table.rows) {
+        for (const cell of row) {
+          if (cell.image) {
+            const url = typeof cell.image === 'string'
+              ? cell.image
+              : cell.image?.url;
+            if (url) urlSet.add(url);
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(urlSet);
+}
+
+/**
  * 规范化页面数据：如果有 blocks，展平为 sections；如果有 sections，保持原样
  * 关键：展平时保留 block_type 信息，这样渲染时能区分规则和奖励
  *
@@ -423,6 +468,30 @@ export function PageCanvas({
 
   // 直接使用后端提供的文本方向（基于地区代码）
   const direction = page.direction || "ltr";
+
+  // 非阻塞预加载：扫描所有图片URL，后台队列加载
+  useEffect(() => {
+    if (forExport) return; // 导出模式不需要预加载
+
+    const preloadImages = async () => {
+      // 1. 收集所有图片URL（自动去重）
+      const urls = collectAllImageUrls(page, style);
+      
+      console.log(`[PageCanvas] 预加载 ${urls.length} 个唯一图片`);
+      
+      // 2. 后台并发加载（loadBitmap 内部有并发控制和去重）
+      // 不等待完成，让组件自己决定何时使用缓存
+      Promise.all(urls.map(url => loadBitmap(url)))
+        .then(() => {
+          console.log(`[PageCanvas] 预加载完成`);
+        })
+        .catch(err => {
+          console.error(`[PageCanvas] 预加载失败:`, err);
+        });
+    };
+
+    preloadImages();
+  }, [page, style, forExport]);
 
   // 根据方向获取文本对齐方式
   const textAlign = direction === "rtl" ? "right" : "left";

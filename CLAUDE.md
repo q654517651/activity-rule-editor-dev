@@ -440,6 +440,401 @@ useLayoutEffect(() => {
 - 异步导出要确保测量完成后再执行，不能假设默认值足够大
 - 30px 的安全边距远远不够，有些页面高度差异达到数百像素
 
+### 图片重复加载和偶发性加载失败优化（2025-12-08）
+
+**症状**：
+- ✅ 本地开发环境图片加载正常
+- ❌ 线上部署时，部分图片偶发性加载失败
+- ❌ 同一图片有时能加载，有时不能
+- ❌ 下次重试同一图片就成功了
+- ❌ 表格编辑弹窗图片显示裂开（404）
+
+**根本原因分析**：
+
+**问题1：缺少正在加载的 Promise 缓存（最核心）**
+```typescript
+// 旧代码（useImageCache.ts）
+if (cache.has(url)) return cache.get(url)!;  // ✅ 检查已完成缓存
+
+const bmp = await loadBitmap(url);  // ❌ 立即开始加载
+cache.set(url, bmp);  // ⚠️ 加载完成后才缓存
+```
+
+**竞态条件时间线**：
+```
+T0: 表格有 10 个相同图片（都是 /media/abc123）
+T1: 10 个组件同时调用 loadBitmap("/media/abc123")
+T2: 第1个检查缓存 → miss，开始加载
+T3: 第2个检查缓存 → 仍然 miss！（第1个还没完成）
+T4: 第3-10个都 miss，都开始加载
+---
+结果：同一图片被请求了 10 次！❌
+```
+
+**为什么导致偶发性加载失败**：
+1. 同时创建 10+ 个 ImageBitmap 占用大量内存
+2. 浏览器可能拒绝创建，导致 Promise reject
+3. 并发队列阻塞（maxConcurrent=6），后续请求超时
+4. 第一次失败后，缓存中没有结果，第二次只有 1-2 个并发 → 成功
+
+**问题2：TableEditModal 图片 URL 未规范化**
+```typescript
+// 旧代码（TableEditModal.tsx）
+<img src={
+  typeof cell.image === "string" 
+    ? cell.image 
+    : cell.image?.url  // ❌ 相对路径 /media/xxx
+} />
+```
+- 本地开发：Vite proxy 自动转发 `/media/*` → `localhost:8000`
+- 线上部署：前后端分离时，`/media/xxx` 从前端域名加载 → 404
+
+**问题3：TableComponentShape 缺少图片占位符**
+```typescript
+// 旧代码
+if (cell.is_image) {
+  const img = loadedImages.get(key);
+  if (img) {
+    ctx.drawImage(img, ...);  // 绘制图片
+  }
+  // ❌ 未加载时，这里跳过，留空白
+}
+```
+
+**问题4：没有统一的预加载机制**
+- 各组件独立调用 loadBitmap（Reward、Table、边框等）
+- 没有去重，同一 URL 被多次调用
+- 没有加载顺序控制，全部并发
+
+**解决方案 - 三层架构优化**：
+
+**层级1：全局 Promise 缓存（核心修复）**
+```typescript
+// useImageCache.ts
+const loadingPromises = new Map<string, Promise<...>>();
+
+export async function loadBitmap(url?: string) {
+  // 1. 检查已完成缓存
+  if (cache.has(normalizedUrl)) {
+    return cache.get(normalizedUrl)!;
+  }
+  
+  // 2. 检查正在加载的 Promise - 复用，避免重复请求 ✅
+  if (loadingPromises.has(normalizedUrl)) {
+    return loadingPromises.get(normalizedUrl)!;
+  }
+  
+  // 3. 创建加载 Promise 并缓存
+  const loadPromise = (async () => {
+    try {
+      const bmp = await requestQueue.add(...);
+      cache.set(normalizedUrl, bmp);
+      return bmp;
+    } finally {
+      loadingPromises.delete(normalizedUrl);  // 加载完成，移除
+    }
+  })();
+  
+  loadingPromises.set(normalizedUrl, loadPromise);
+  return loadPromise;
+}
+```
+
+**层级2：PageCanvas 非阻塞预加载**
+```typescript
+// PageCanvas.tsx
+function collectAllImageUrls(page: Page, style: StyleCfg): string[] {
+  const urlSet = new Set<string>();
+  
+  // 扫描边框、标题背景
+  if (style.border.image) urlSet.add(style.border.image);
+  if (style.blockTitleBg) urlSet.add(style.blockTitleBg);
+  if (style.sectionTitleBg) urlSet.add(style.sectionTitleBg);
+  
+  // 扫描所有 sections 的 rewards 和 table
+  for (const section of normalizedPage.sections || []) {
+    // 扫描 rewards 图片
+    for (const reward of section.rewards || []) {
+      if (reward.image) urlSet.add(getImageUrl(reward.image));
+    }
+    
+    // 扫描 table 图片
+    if (section.table?.rows) {
+      for (const row of section.table.rows) {
+        for (const cell of row) {
+          if (cell.image) urlSet.add(getImageUrl(cell.image));
+        }
+      }
+    }
+  }
+  
+  return Array.from(urlSet);  // 去重后返回
+}
+
+useEffect(() => {
+  if (forExport) return;
+  
+  const preloadImages = async () => {
+    const urls = collectAllImageUrls(page, style);
+    console.log(`[PageCanvas] 预加载 ${urls.length} 个唯一图片`);
+    
+    // 后台并发加载，不阻塞渲染 ✅
+    Promise.all(urls.map(url => loadBitmap(url)))
+      .then(() => console.log(`[PageCanvas] 预加载完成`));
+  };
+  
+  preloadImages();
+}, [page, style, forExport]);
+```
+
+**层级3：TableComponentShape 添加占位符**
+```typescript
+// TableComponentShape.tsx
+if (cell.is_image) {
+  const img = loadedImages.get(key);
+  
+  if (img) {
+    // 绘制实际图片
+    ctx.drawImage(img, ...);
+  } else {
+    // 图片未加载完成，显示占位符 ✅
+    ctx.fillStyle = "#f0f0f0";
+    ctx.fillRect(placeholderX, placeholderY, maxImgW, maxImgH);
+    
+    ctx.fillStyle = "#999";
+    ctx.fillText("Loading...", cellX + cellW / 2, cellY + cellH / 2);
+  }
+}
+```
+
+**层级4：TableEditModal URL 规范化**
+```typescript
+// TableEditModal.tsx
+import { normalizeImageUrl } from "@/renderer/canvas/useImageCache";
+
+<img src={normalizeImageUrl(
+  typeof cell.image === "string"
+    ? cell.image
+    : cell.image?.url || ""
+)} />
+```
+
+**文件修改**：
+- `web/src/renderer/canvas/useImageCache.ts`：
+  - 添加 `loadingPromises` Map 防止重复加载
+  - 修改 `loadBitmap()` 逻辑，复用正在加载的 Promise
+  - 添加 `isImageCached()` 和 `getCachedImage()` 辅助函数
+  - 修改 `clearImageCache()` 同时清空 loadingPromises
+  
+- `web/src/renderer/canvas/PageCanvas.tsx`：
+  - 添加 `collectAllImageUrls()` 函数扫描所有图片 URL
+  - 添加非阻塞预加载 useEffect
+  - 预加载不阻塞渲染，后台并发执行
+  
+- `web/src/renderer/canvas/TableComponentShape.tsx`：
+  - 在图片单元格未加载时显示占位符（灰色背景 + "Loading..."）
+  - 添加注释说明复用 PageCanvas 预加载的 Promise
+  
+- `web/src/components/TableEditModal.tsx`：
+  - 导入 `normalizeImageUrl`
+  - 使用 `normalizeImageUrl()` 规范化图片 URL
+
+**数据流改进**：
+```
+┌──────────── 优化后的流程 ────────────┐
+│                                      │
+│ 1️⃣ 用户上传 Excel                    │
+│    ↓                                 │
+│    setData(json)                     │
+│    ↓                                 │
+│ 2️⃣ PageCanvas 立即渲染（非阻塞）     │
+│    ├─ 文字、表格结构立即显示 ✅      │
+│    ├─ 图片位置显示占位符 ✅          │
+│    └─ 后台预加载所有图片（去重）     │
+│         ↓                            │
+│ 3️⃣ 组件调用 loadBitmap()             │
+│    ├─ 已缓存 → 立即返回 ✅           │
+│    ├─ 正在加载 → 复用 Promise ✅     │
+│    └─ 未开始 → 触发加载              │
+│         ↓                            │
+│ 4️⃣ 图片加载完成                      │
+│    └─ 自动替换占位符 ✅              │
+│                                      │
+└──────────────────────────────────────┘
+```
+
+**修复效果对比**：
+
+| 方面 | 修复前 | 修复后 |
+|------|--------|--------|
+| **重复请求** | ❌ 同一图片请求 10+ 次 | ✅ 每个唯一 URL 只请求 1 次 |
+| **加载失败** | ❌ 偶发性 "image load error" | ✅ 稳定加载，无竞态 |
+| **Table 占位** | ❌ 未加载时空白 | ✅ 显示 "Loading..." |
+| **Modal 图片** | ❌ 线上部署 404 | ✅ 使用规范化 URL |
+| **渲染阻塞** | ⚠️ 部分组件等待图片 | ✅ 立即渲染，后台加载 |
+| **去重机制** | ❌ 无 | ✅ Set 自动去重 |
+
+**架构原则（重要）**：
+1. ✅ **loadBitmap 全局缓存**：cache + loadingPromises 强制所有组件统一路径
+2. ✅ **组件只读缓存**：组件不负责加载，只负责显示（占位 + 使用缓存）
+3. ✅ **非阻塞预加载**：PageCanvas 后台预加载，不阻塞页面渲染
+4. ✅ **URL 规范化**：所有图片 URL 统一通过 normalizeImageUrl 处理
+
+**测试验证**：
+1. 上传包含大量重复图片的 Excel
+2. 打开浏览器控制台 Network 面板
+3. 观察每个唯一图片只有 1 个请求 ✅
+4. 表格立即显示占位符，逐渐加载图片 ✅
+5. 点击表格编辑，图片正常显示（不再 404）✅
+
+**教训**：
+- Promise 缓存是防止重复加载的核心机制
+- 组件应该是 read-only，禁止自己发请求（依赖预加载）
+- 预加载应该是非阻塞的，不能等加载完成后再渲染
+- URL 规范化必须在所有使用图片的地方统一处理
+- 竞态条件问题通常在网络慢、数据量大时暴露
+- 本地开发环境的 proxy 配置会掩盖真实部署环境的问题
+
+### 表格编辑弹窗图片优化（2025-12-08）
+
+**需求**：
+1. 表格编辑弹窗中的图片在线上部署时显示裂开（404）
+2. 表格图片应该支持点击上传替换（像奖励图片那样）
+3. 不需要显示图片 URL 输入框
+
+**问题分析**：
+虽然已经添加了 `normalizeImageUrl()`，但还有以下问题：
+1. 图片加载失败没有友好的错误提示
+2. 图片不能点击上传替换（只能编辑 URL）
+3. URL 输入框对用户不友好
+
+**解决方案**：
+
+**1. 添加图片上传功能**
+```typescript
+// TableEditModal.tsx
+const handleImageUpload = (rowIdx: number, cellIdx: number, file: File) => {
+  if (!file.type.startsWith("image/")) {
+    alert("请上传图片文件");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const dataUrl = e.target?.result as string;
+    const newTable = { ...editedTable };
+    
+    // 更新图片为 data URL
+    if (typeof newTable.rows[rowIdx][cellIdx].image === "string") {
+      newTable.rows[rowIdx][cellIdx].image = dataUrl;
+    } else {
+      newTable.rows[rowIdx][cellIdx].image = {
+        url: dataUrl,
+        id: `local-${Date.now()}`,
+      };
+    }
+    
+    setEditedTable(newTable);
+  };
+  reader.readAsDataURL(file);
+};
+```
+
+**2. 重构图片单元格 UI**
+```typescript
+<div
+  className="relative border-2 border-dashed rounded-lg p-2 cursor-pointer hover:border-primary transition-colors"
+  role="button"
+  onClick={() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        handleImageUpload(rowIdx, cellIdx, file);
+      }
+    };
+    input.click();
+  }}
+>
+  {cell.image ? (
+    <div className="relative">
+      <img
+        src={normalizeImageUrl(
+          typeof cell.image === "string"
+            ? cell.image
+            : cell.image?.url || ""
+        )}
+        onError={(e) => {
+          // 图片加载失败时显示提示
+          e.currentTarget.style.display = "none";
+          const parent = e.currentTarget.parentElement;
+          if (parent && !parent.querySelector(".error-msg")) {
+            const errorDiv = document.createElement("div");
+            errorDiv.className = "error-msg text-red-500 text-sm text-center p-4";
+            errorDiv.textContent = "图片加载失败，点击重新上传";
+            parent.appendChild(errorDiv);
+          }
+        }}
+      />
+      <div className="absolute bottom-0 right-0 bg-primary text-white text-xs px-2 py-1 rounded-tl opacity-0 hover:opacity-100 transition-opacity">
+        点击更换
+      </div>
+    </div>
+  ) : (
+    <div className="text-center py-8 text-gray-400">
+      <div className="text-4xl mb-2">📁</div>
+      <p className="text-sm">点击上传图片</p>
+    </div>
+  )}
+</div>
+```
+
+**3. 移除 URL 输入框**
+```typescript
+// 移除以下代码
+<Input
+  label="图片URL"
+  size="sm"
+  value={cell.value || ""}
+  onChange={(e) => handleCellChange(rowIdx, cellIdx, e.target.value)}
+/>
+```
+
+**文件修改**：
+- `web/src/components/TableEditModal.tsx`：
+  - 添加 `handleImageUpload()` 函数处理图片上传
+  - 重构图片单元格 UI，支持点击上传
+  - 添加图片加载失败的错误处理
+  - 添加悬浮提示"点击更换"
+  - 移除 URL 输入框和 Input 组件导入
+  - 确保使用 `normalizeImageUrl()` 显示图片
+
+**交互优化**：
+1. ✅ 点击图片区域弹出文件选择对话框
+2. ✅ 选择图片后自动转为 data URL
+3. ✅ 悬停显示"点击更换"提示
+4. ✅ 图片加载失败显示错误提示
+5. ✅ 无图片时显示上传占位符（📁图标）
+6. ✅ 支持键盘操作（Enter/Space）
+
+**修复效果**：
+- ✅ 线上部署图片正常显示（使用 normalizeImageUrl）
+- ✅ 图片可以点击上传替换
+- ✅ 不再显示技术性的 URL 输入框
+- ✅ 图片加载失败时有友好提示
+- ✅ 与奖励图片上传体验一致
+
+**用户体验提升**：
+| 方面 | 修复前 | 修复后 |
+|------|--------|--------|
+| **图片显示** | ❌ 线上404 | ✅ 正常显示 |
+| **图片替换** | ❌ 只能编辑URL | ✅ 点击上传 |
+| **URL输入框** | ❌ 技术性，不友好 | ✅ 已移除 |
+| **错误提示** | ❌ 无提示 | ✅ 友好提示 |
+| **交互方式** | ❌ 手动输入链接 | ✅ 点击上传文件 |
+
 ### 上传组件加载状态优化（2025-12-03）
 
 **问题**：

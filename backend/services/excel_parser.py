@@ -267,20 +267,8 @@ def parse_section_block(ws, c1, c2, r_start, r_end, merge_idx):
             if has_table_in_content:
                 break
             
-            # 检查是否是空行（但不要停止，要保留空行）
-            # 只有当连续遇到多个空行或到达表格末尾标记时才停止
-            is_empty_row = is_row_blank(rv)
-            
-            # 如果是空行，检查下一行是否也是空行或有标记
-            # 连续两个空行才停止（避免表格中间的单个空行被跳过）
-            if is_empty_row and rr + 1 <= r_end:
-                next_marker = clean_text(get_value(ws, rr + 1, c1, merge_idx))
-                next_rv = row_region_values(ws, rr + 1, table_c1, table_c2, merge_idx)
-                # 如果下一行是空行或者标记列有标记，则停止
-                if is_row_blank(next_rv) or (next_marker and (next_marker.startswith("TITLE-") or next_marker.startswith("RINK-") or next_marker.startswith("RANK-"))):
-                    break
-            
             # 收集这一行的数据（表格范围内的所有列）
+            # 注意：不检查空行，因为图片单元格可能显示为空但实际包含图片
             row_data = []
             col_output_idx = 0  # 输出列索引
             
