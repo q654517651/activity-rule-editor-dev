@@ -58,6 +58,19 @@ uv sync
 uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+### 局域网调试启动
+
+如果需要让同一局域网内的其他设备访问当前开发环境，请使用以下命令：
+
+```bash
+# 后端：监听所有网卡
+uv run uvicorn backend.api.main:app --reload --host 0.0.0.0 --port 8000
+
+# 前端：暴露 Vite 开发服务器
+cd web
+pnpm dev:lan
+```
+
 ### 前端启动
 
 ```bash

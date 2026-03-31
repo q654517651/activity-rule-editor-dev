@@ -8,6 +8,7 @@ export default defineConfig({
   base: "/activity-rule-editor/",
   plugins: [react(), tsconfigPaths(), tailwindcss()],
   server: {
+    host: "0.0.0.0",
     allowedHosts: [
       ".ngrok-free.dev",
       ".ngrok.io",

@@ -1,6 +1,6 @@
 import type { TableData } from "./types";
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { Group, Image as KImage, Rect } from "react-konva";
+import { Group, Image as KImage } from "react-konva";
 import { loadBitmap } from "./useImageCache";
 
 // 计算文字换行（带缓存）
@@ -117,7 +117,6 @@ export function TableComponentShape({
   maxImageHeight = 120,
   onHeightMeasured,
   onTableClick,
-  forExport = false,
 }: {
   table: TableData;
   x: number;
@@ -359,7 +358,7 @@ export function TableComponentShape({
       
       // 为每个单元格绘制右边和下边的线（避免合并单元格内部的线）
       for (const layout of cellLayouts) {
-        const { x: cellX, y: cellY, width: cellW, height: cellH, cell } = layout;
+        const { x: cellX, y: cellY, width: cellW, height: cellH } = layout;
         
         ctx.beginPath();
         

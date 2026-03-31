@@ -39,6 +39,7 @@ import {
   type DownloadItem,
 } from "@/components/DownloadHistory";
 import { DownloadMenu } from "@/components/DownloadMenu";
+import { fetchCompat } from "@/utils/fetch";
 
 function defaultStyle(): StyleCfg {
   return {
@@ -50,9 +51,6 @@ function defaultStyle(): StyleCfg {
     font: { family: "system-ui, sans-serif", size: 24, lineHeight: 1.6 },
   };
 }
-
-// 使用相对路径，开发时通过 Vite proxy 转发到后端，生产环境根据需要配置
-const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 // 图片位图缓存
 const imageBitmapCache = new Map<string, ImageBitmap>();
@@ -489,7 +487,7 @@ export default function PreviewPage() {
       const fd = new FormData();
 
       fd.append("file", file);
-      const res = await fetch(`${API_BASE}/api/parse`, {
+      const res = await fetchCompat("/api/parse", {
         method: "POST",
         body: fd,
       });

@@ -81,3 +81,12 @@ htmlcov/
 *.temp
 .cache/
 
+# Electron / Node 后端本地产物与大文件（源码已入库，构建产物本地生成）
+electron/dist/
+electron/backend-build/
+electron/backend-dist/
+backend-node/uploads/
+web/dist-electron/
+node_output.json
+python_output.json
+
