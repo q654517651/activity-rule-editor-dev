@@ -55,18 +55,20 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
 # 启动 API 服务器
+#
+# 注意：--host 127.0.0.1 时只有本机能访问，同一局域网里用手机/其它电脑
+# 打开 http://你的局域网IP:8000 会连不上。需要局域网访问时用下面这条。
 uv run uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
+
+# 局域网内可访问（手机、其它电脑能打开 http://<本机IP>:8000/activity-rule-editor/）
+uv run uvicorn backend.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 局域网调试启动
+### 局域网调试（前端 Vite）
 
-如果需要让同一局域网内的其他设备访问当前开发环境，请使用以下命令：
+其它设备要连开发中的前端时，在 `web/` 下使用：
 
 ```bash
-# 后端：监听所有网卡
-uv run uvicorn backend.api.main:app --reload --host 0.0.0.0 --port 8000
-
-# 前端：暴露 Vite 开发服务器
 cd web
 pnpm dev:lan
 ```
