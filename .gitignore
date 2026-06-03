@@ -81,6 +81,14 @@ htmlcov/
 *.temp
 .cache/
 
+# AI agent / skills 本地工具目录
+.agents/
+.claude/
+.kiro/
+.qoder/
+skills/
+skills-lock.json
+
 # Electron / Node 后端本地产物与大文件（源码已入库，构建产物本地生成）
 electron/dist/
 electron/backend-build/

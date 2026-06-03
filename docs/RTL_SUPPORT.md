@@ -4,23 +4,43 @@
 
 ## 功能特性
 
-### 基于地区代码的语言判断
+### 基于地区代码 + 字符内容的语言判断
 
-系统根据 Excel 文件中的 **地区代码（region）** 自动判断语言方向：
+系统根据 Excel 文件中的 **地区代码（region）** 自动判断语言方向，**满足以下任一条件即视为 RTL**：
 
-- **后端自动识别**：在解析 Excel 时，后端根据 `REGION-` 标记的地区代码判断语言方向
-- **RTL 地区列表**：
-  - `MECA`：中东
-  - `ARAB`, `ARABIC`：阿拉伯地区
-  - `SA`：沙特阿拉伯
-  - `UAE`：阿联酋
-  - `EG`：埃及
-  - `IL`, `ISRAEL`：以色列（希伯来语）
-  - `JO`：约旦
-  - `LB`：黎巴嫩
-  - `IQ`：伊拉克
-  - `SY`：叙利亚
-- **零配置**：前端直接使用后端提供的 `direction` 字段，无需额外配置
+**条件 1：region code 命中预定义 RTL 地区列表**
+
+- `MECA`：中东
+- `ARAB`, `ARABIC`：阿拉伯地区
+- `SA`：沙特阿拉伯
+- `UAE`：阿联酋
+- `EG`：埃及
+- `IL`, `ISRAEL`：以色列（希伯来语）
+- `JO`：约旦
+- `LB`：黎巴嫩
+- `IQ`：伊拉克
+- `SY`：叙利亚
+- `XM`：中东市场聚合代号
+
+**条件 2：region code 字符串本身包含阿拉伯语 / 希伯来语字符**
+
+兼容把阿拉伯文 / 希伯来文标题直接当作 region 名的情况，例如：
+
+```
+REGION-جوائز قائمة المرسلين    ← 自动识别为 RTL
+REGION-שלום                    ← 自动识别为 RTL
+```
+
+检测覆盖以下 Unicode 区间：
+
+- 阿拉伯语：U+0600-U+06FF
+- 阿拉伯语补充：U+0750-U+077F
+- 阿拉伯语扩展-A：U+08A0-U+08FF
+- 阿拉伯语表现形式-A：U+FB50-U+FDFF
+- 阿拉伯语表现形式-B：U+FE70-U+FEFF
+- 希伯来语：U+0590-U+05FF
+
+**零配置**：前端直接使用后端提供的 `direction` 字段，无需额外配置。
 
 ### RTL 布局调整
 
@@ -92,8 +112,13 @@
 **后端（Python）：**
 1. **excel_parser.py**：
    - `RTL_REGIONS`：RTL 地区代码集合
-   - `is_rtl_region(region_code)`：判断地区是否为 RTL
+   - `_contains_rtl_chars(text)`：检测字符串是否包含阿拉伯 / 希伯来字符
+   - `is_rtl_region(region_code)`：判断地区是否为 RTL（先看字符内容，再看地区代码）
    - 在 `parse_sheet()` 中为每个 page 添加 `direction` 字段
+
+**后端（Node.js）：**
+1. **backend-node/src/services/excelParser.js**：
+   - 与 Python 后端逻辑保持一致的 `isRTLRegion()` 实现
 
 **前端（TypeScript）：**
 1. **PageCanvas.tsx**：画布渲染组件

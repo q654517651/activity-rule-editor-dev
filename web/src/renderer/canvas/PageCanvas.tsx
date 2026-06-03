@@ -28,6 +28,7 @@ function collectAllImageUrls(page: Page, style: StyleCfg): string[] {
   if (style.border.image) urlSet.add(style.border.image);
   if (style.blockTitleBg) urlSet.add(style.blockTitleBg);
   if (style.sectionTitleBg) urlSet.add(style.sectionTitleBg);
+  if (style.rewardBg) urlSet.add(style.rewardBg);
 
   // 2. 规范化页面（支持新旧结构）
   const normalizedPage = normalizePage(page);
@@ -137,6 +138,7 @@ function RewardItem({
   const [imageStatus, setImageStatus] = useState<
     "loading" | "loaded" | "error" | "none"
   >("none");
+  const [rewardBgBmp, setRewardBgBmp] = useState<CanvasImageSource | null>(null);
   const nameRef = useRef<Konva.Text>(null);
   const descRef = useRef<Konva.Text>(null);
   const [hoveredPart, setHoveredPart] = useState<
@@ -182,11 +184,31 @@ function RewardItem({
     })();
   }, [reward.image]);
 
+  // 加载奖励背景图
+  useEffect(() => {
+    if (!style.rewardBg) {
+      setRewardBgBmp(null);
+      return;
+    }
+    (async () => {
+      const bmp = await loadBitmap(style.rewardBg);
+      if (bmp) setRewardBgBmp(bmp as any);
+      else setRewardBgBmp(null);
+    })();
+  }, [style.rewardBg]);
+
+  // 图片尺寸（保持正方形容器，内部图片长边贴边）
+  const imgBoxSize = 160;
+  const imgPadding = 4;
+  const imgBoxH = imgBoxSize + imgPadding * 2;
+  const rewardImgGap = style.rewardImgGap ?? 4;
+  // 奖励图在背景框内的内边距（防止奖励图与背景边缘重合）
+  const rewardBgPad = style.rewardBgPad ?? 0;
+  // 实际可用于奖励图显示的尺寸（背景框减去内边距）
+  const innerImgSize = Math.max(8, imgBoxSize - rewardBgPad * 2);
+
   // 测量实际渲染高度（依赖 imageStatus 以便状态变化时重新测量）
   useLayoutEffect(() => {
-    const imgBoxH = 160 + 8;
-    const textGapV = 4;
-
     let nameH = 0;
     let descH = 0;
 
@@ -198,22 +220,18 @@ function RewardItem({
       descH = descRef.current.height();
     }
 
+    const textGapV = 4;
     const totalH =
-      imgBoxH + (nameH ? nameH + textGapV : 0) + (descH ? descH + textGapV : 0);
+      imgBoxH + rewardImgGap + (nameH ? nameH + textGapV : 0) + (descH ? descH + textGapV : 0);
 
     if (onHeightMeasured && totalH > 0) {
       onHeightMeasured(totalH);
     }
-  }, [reward.name, reward.desc, width, onHeightMeasured, imageStatus]);
+  }, [reward.name, reward.desc, width, onHeightMeasured, imageStatus, imgBoxH, rewardImgGap]);
 
-  // 图片尺寸（保持正方形容器，内部图片长边贴边）
-  const imgBoxSize = 160;
-  const imgPadding = 4;
-  const imgBoxH = imgBoxSize + imgPadding * 2;
-
-  // 计算图片的实际尺寸（长边贴边，保持比例）
-  let displayImgW = imgBoxSize;
-  let displayImgH = imgBoxSize;
+  // 计算图片的实际尺寸（长边贴边，保持比例），受 rewardBgPad 约束
+  let displayImgW = innerImgSize;
+  let displayImgH = innerImgSize;
   let imgOffsetX = 0;
   let imgOffsetY = 0;
 
@@ -223,18 +241,18 @@ function RewardItem({
     const aspectRatio = originalW / originalH;
 
     if (aspectRatio > 1) {
-      displayImgW = imgBoxSize;
-      displayImgH = imgBoxSize / aspectRatio;
-      imgOffsetY = (imgBoxSize - displayImgH) / 2;
+      displayImgW = innerImgSize;
+      displayImgH = innerImgSize / aspectRatio;
+      imgOffsetY = (innerImgSize - displayImgH) / 2;
     } else {
-      displayImgH = imgBoxSize;
-      displayImgW = imgBoxSize * aspectRatio;
-      imgOffsetX = (imgBoxSize - displayImgW) / 2;
+      displayImgH = innerImgSize;
+      displayImgW = innerImgSize * aspectRatio;
+      imgOffsetX = (innerImgSize - displayImgW) / 2;
     }
   }
 
   // 文字区域
-  const textStartY = imgBoxH + 4;
+  const textStartY = imgBoxH + rewardImgGap;
   const textGapV = 4;
 
   // 获取实际渲染高度（通过 ref）
@@ -242,6 +260,18 @@ function RewardItem({
 
   return (
     <Group x={x} y={y}>
+      {/* 奖励背景图（渲染在最底层，铺满整个图片区域） */}
+      {rewardBgBmp && (
+        <KImage
+          height={imgBoxSize}
+          image={rewardBgBmp as any}
+          listening={false}
+          width={imgBoxSize}
+          x={(width - imgBoxSize) / 2}
+          y={imgPadding}
+        />
+      )}
+
       {/* 图片加载状态显示 - 只有在确实有图片时才显示 */}
       {imageStatus === "loading" && reward.image && (
         <Group>
@@ -299,7 +329,7 @@ function RewardItem({
         </Group>
       )}
 
-      {/* 奖励图片 - 已加载 */}
+      {/* 奖励图片 - 已加载，在背景框内居中并留 rewardBgPad 内边距 */}
       {rewardImg && imageStatus === "loaded" && (
         <>
           <KImage
@@ -307,8 +337,8 @@ function RewardItem({
             image={rewardImg as any}
             listening={!forExport}
             width={displayImgW}
-            x={(width - imgBoxSize) / 2 + imgOffsetX}
-            y={imgPadding + imgOffsetY}
+            x={(width - imgBoxSize) / 2 + rewardBgPad + imgOffsetX}
+            y={imgPadding + rewardBgPad + imgOffsetY}
             onClick={() => {
               if (!forExport && onImageClick) {
                 onImageClick();

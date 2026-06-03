@@ -3,6 +3,15 @@ import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Group, Image as KImage } from "react-konva";
 import { loadBitmap } from "./useImageCache";
 
+// 检测文字中是否包含 RTL 字符（阿拉伯、希伯来等）
+// 用作兜底：即使 page.direction 是 ltr，单元格内容含 RTL 字符也按 rtl 渲染，
+// 这样 Canvas BiDi 算法才能正确处理"10 ايام"这种数字+阿语混合文本
+function containsRTLChars(text: string): boolean {
+  if (!text) return false;
+  // 阿拉伯文(基本/补充/扩展A/表音/表意) + 希伯来文(基本/扩展)
+  return /[\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(text);
+}
+
 // 计算文字换行（带缓存）
 const wrapTextCache = new Map<string, string[]>();
 
@@ -425,15 +434,26 @@ export function TableComponentShape({
           const textColor = cell.bold ? titleColor : contentColor;
           ctx.fillStyle = textColor;
           ctx.font = `${cell.bold ? "bold " : ""}${fontSize}px ${fontFamily}`;
-          
+
+          // 单元格级别的方向判定：
+          // 1. page 级别 direction 为 rtl 时，整张表统一 rtl
+          // 2. 否则只要单元格内容包含 RTL 字符（阿拉伯/希伯来），就按 rtl 渲染该单元格
+          //    这样可以正确处理 LTR 表格里混入的 RTL 文本（如"10 ايام"）
+          const cellHasRTL = lines.some((line) => containsRTLChars(line));
+          const cellDirection: "rtl" | "ltr" =
+            direction === "rtl" || cellHasRTL ? "rtl" : "ltr";
+
+          // 设置 Canvas direction，让 BiDi 算法正确处理混合文字
+          ctx.direction = cellDirection as CanvasDirection;
+
           // 文字对齐（带水平内边距）
           const textX = cell.center
             ? cellX + cellW / 2
-            : direction === "rtl"
+            : cellDirection === "rtl"
               ? cellX + cellW - cellPadding
               : cellX + cellPadding;
-          
-          ctx.textAlign = cell.center ? "center" : direction === "rtl" ? "right" : "left";
+
+          ctx.textAlign = cell.center ? "center" : cellDirection === "rtl" ? "right" : "left";
           
           // 垂直居中（带垂直内边距）
           const lineHeight = fontSize * 1.6;

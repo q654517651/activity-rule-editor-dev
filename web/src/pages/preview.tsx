@@ -24,6 +24,11 @@ import {
   Tab,
   Skeleton,
   Slider,
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
 } from "@heroui/react";
 
 import { PageCanvas } from "@/renderer/canvas/PageCanvas";
@@ -48,6 +53,8 @@ function defaultStyle(): StyleCfg {
     titleColor: "#0f172a",
     contentColor: "#334155",
     border: { image: "", slice: { t: 100, r: 66, b: 100, l: 66 } },
+    rewardBgPad: 16,
+    rewardImgGap: 4,
     font: { family: "system-ui, sans-serif", size: 24, lineHeight: 1.6 },
   };
 }
@@ -382,8 +389,14 @@ export default function PreviewPage() {
   const [loadingBorder, setLoadingBorder] = useState(false);
   const [loadingBlockTitleBg, setLoadingBlockTitleBg] = useState(false);
   const [loadingSectionTitleBg, setLoadingSectionTitleBg] = useState(false);
+  const [loadingRewardBg, setLoadingRewardBg] = useState(false);
   const [loadingExport, setLoadingExport] = useState(false); // 导出加载状态
-  
+
+  // 飞书表格直拉模式（用本机 lark-cli 拉原图，保留透明度）
+  const [larkUrl, setLarkUrl] = useState("");
+  const [loadingLark, setLoadingLark] = useState(false);
+  const [larkError, setLarkError] = useState<string | null>(null);
+
   const [error, setError] = useState<string | null>(null);
   const [heights, setHeights] = useState<number[]>([]);
   const [tableImageSize, setTableImageSize] = useState(120); // 表格图片大小
@@ -400,6 +413,9 @@ export default function PreviewPage() {
   const [uploadedSectionTitleBg, setUploadedSectionTitleBg] = useState<string | null>(
     null,
   ); // 已上传的小标题背景文件名
+  const [uploadedRewardBg, setUploadedRewardBg] = useState<string | null>(
+    null,
+  ); // 已上传的奖励图背景文件名
 
   // 编辑功能状态
   const [editingText, setEditingText] = useState<{
@@ -480,40 +496,21 @@ export default function PreviewPage() {
     }
   }, []);
 
-  const onPickXlsx = useCallback(async (file: File) => {
-    setLoadingData(true);
-    setError(null);
-    try {
-      const fd = new FormData();
-
-      fd.append("file", file);
-      const res = await fetchCompat("/api/parse", {
-        method: "POST",
-        body: fd,
-      });
-
-      if (!res.ok) throw new Error(`后端返回错误: ${res.status}`);
-      const payload = (await res.json()) as ParseResponse;
-
-      if (!payload?.ok) throw new Error(payload?.error || "解析失败");
-
-      // 统一处理 sheets 结构
+  // 把后端 ParseResponse 转成前端 sheets state 的通用处理
+  const applyParsedResponse = useCallback(
+    (payload: ParseResponse, displayName: string) => {
       const sheets = new Map<string, Data>();
       const names = Object.keys(payload.sheets);
 
-      // 调试：打印完整的后端返回数据
       console.log("【完整后端返回】", JSON.stringify(payload, null, 2));
 
       names.forEach((name) => {
-        // 调用 rewriteImages 重写图片 URL
         const sheetData = rewriteImages(
           payload.sheets[name].result,
           payload.sheets[name].images,
         );
 
         sheets.set(name, sheetData);
-
-        // 调试：打印每个 sheet 处理后的数据
         console.log(
           `【Sheet: ${name} 处理后】`,
           JSON.stringify(sheetData, null, 2),
@@ -523,7 +520,6 @@ export default function PreviewPage() {
       setAllSheets(sheets);
       setSheetNames(names);
 
-      // 选中第一个 sheet
       if (names.length > 0) {
         setCurrentSheet(names[0]);
         setData(sheets.get(names[0])!);
@@ -538,13 +534,85 @@ export default function PreviewPage() {
           payload.skipped_sheets,
         );
       }
-      setUploadedDataFile({ name: file.name, type: "xlsx" });
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
-    } finally {
-      setLoadingData(false);
+      setUploadedDataFile({ name: displayName, type: "xlsx" });
+    },
+    [],
+  );
+
+  const onPickXlsx = useCallback(
+    async (file: File) => {
+      setLoadingData(true);
+      setError(null);
+      try {
+        const fd = new FormData();
+
+        fd.append("file", file);
+        const res = await fetchCompat("/api/parse", {
+          method: "POST",
+          body: fd,
+        });
+
+        if (!res.ok) throw new Error(`后端返回错误: ${res.status}`);
+        const payload = (await res.json()) as ParseResponse;
+
+        if (!payload?.ok) throw new Error(payload?.error || "解析失败");
+
+        applyParsedResponse(payload, file.name);
+      } catch (e: any) {
+        setError(e?.message ?? String(e));
+      } finally {
+        setLoadingData(false);
+      }
+    },
+    [applyParsedResponse],
+  );
+
+  // 从飞书表格链接加载（用本机 lark-cli 拉原图，保留透明度）
+  const onLoadFromLark = useCallback(async () => {
+    const url = larkUrl.trim();
+
+    if (!url) {
+      setLarkError("请先粘贴飞书表格链接");
+      return;
     }
-  }, []);
+    if (!/feishu\.\w+\/(sheets|wiki|docs)\//i.test(url)) {
+      setLarkError(
+        "链接格式不对，应为 https://xxx.feishu.cn/sheets/... 或 /wiki/...",
+      );
+      return;
+    }
+
+    setLoadingLark(true);
+    setError(null);
+    try {
+      const res = await fetchCompat("/api/parse_from_lark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+
+      const payload = (await res.json()) as ParseResponse & {
+        source?: { kind: string; spreadsheet_token: string; url: string };
+      };
+
+      if (!res.ok || !payload?.ok) {
+        throw new Error(
+          payload?.error ||
+            `请求失败 (HTTP ${res.status})，请检查链接是否正确或后端鉴权是否过期`,
+        );
+      }
+
+      // 显示名用 source 的 token 后 6 位拼一下
+      const tokenTail =
+        payload.source?.spreadsheet_token?.slice(-6) || "lark";
+
+      applyParsedResponse(payload, `飞书表格 (${tokenTail})`);
+    } catch (e: any) {
+      setLarkError(e?.message ?? String(e));
+    } finally {
+      setLoadingLark(false);
+    }
+  }, [larkUrl, applyParsedResponse]);
 
   const onPickDataFile = useCallback(
     (file: File) => {
@@ -659,6 +727,35 @@ export default function PreviewPage() {
   const onDeleteSectionTitleBg = useCallback(() => {
     setStyle((s) => ({ ...s, sectionTitleBg: undefined }));
     setUploadedSectionTitleBg(null);
+  }, []);
+
+  // 上传奖励图背景
+  const onPickRewardBg = useCallback(async (file: File) => {
+    setLoadingRewardBg(true);
+    const blobUrl = URL.createObjectURL(file);
+
+    try {
+      const res = await fetch(blobUrl);
+      const blob = await res.blob();
+      const d = await new Promise<string>((resolve) => {
+        const fr = new FileReader();
+
+        fr.onload = () => resolve(fr.result as string);
+        fr.readAsDataURL(blob);
+      });
+
+      setStyle((s) => ({ ...s, rewardBg: d }));
+      setUploadedRewardBg(file.name);
+    } finally {
+      setLoadingRewardBg(false);
+      URL.revokeObjectURL(blobUrl);
+    }
+  }, []);
+
+  // 删除奖励图背景
+  const onDeleteRewardBg = useCallback(() => {
+    setStyle((s) => ({ ...s, rewardBg: undefined }));
+    setUploadedRewardBg(null);
   }, []);
 
   // Sheet 切换处理 - 简单清理即可，虚拟化会自动处理
@@ -1391,6 +1488,44 @@ export default function PreviewPage() {
                 />
               </div>
             )}
+
+            {/* 飞书表格直拉（保留图片透明度） */}
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <div className="text-xs text-gray-500 mb-2 flex items-center gap-1">
+                <span>或从飞书表格加载</span>
+                <span
+                  className="text-gray-400"
+                  title="直接从飞书拉取原图，保留透明度（解决 XLSX 导出图片变黑底的问题）"
+                >
+                  ⓘ
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  isDisabled={loadingLark}
+                  placeholder="粘贴飞书表格 / Wiki 链接"
+                  size="sm"
+                  value={larkUrl}
+                  variant="bordered"
+                  onValueChange={setLarkUrl}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !loadingLark) {
+                      onLoadFromLark();
+                    }
+                  }}
+                />
+                <Button
+                  color="primary"
+                  isDisabled={!larkUrl.trim() || loadingLark}
+                  isLoading={loadingLark}
+                  size="sm"
+                  onPress={onLoadFromLark}
+                >
+                  {loadingLark ? "加载中" : "加载"}
+                </Button>
+              </div>
+            </div>
+
             {error ? (
               <div className="text-xs text-red-600 mt-3">{error}</div>
             ) : null}
@@ -1601,6 +1736,86 @@ export default function PreviewPage() {
                 />
               </div>
             )}
+
+            {/* 奖励图背景 */}
+            <h3 className="text-sm font-semibold text-gray-700 mt-6 mb-3">
+              奖励图背景
+            </h3>
+            {uploadedRewardBg ? (
+              <div className="relative border-2 border-gray-200 rounded-lg p-3 bg-gray-50 min-h-[120px] flex items-center">
+                <Button
+                  isIconOnly
+                  aria-label="删除奖励图背景"
+                  className="absolute top-2 right-2 z-10"
+                  color="danger"
+                  size="sm"
+                  variant="flat"
+                  onPress={onDeleteRewardBg}
+                >
+                  ✕
+                </Button>
+                <div className="flex items-center gap-3 pr-8 w-full">
+                  {style.rewardBg && (
+                    <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden border border-gray-200">
+                      <img
+                        alt="奖励图背景预览"
+                        className="w-full h-full object-cover"
+                        src={style.rewardBg}
+                      />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">
+                      {uploadedRewardBg}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">奖励图背景图片</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="min-h-[120px]">
+                <DragDropZone
+                  accept="image/*"
+                  description="点击选择或拖拽图片到此处"
+                  icon="🏆"
+                  label="选择奖励图背景"
+                  loading={loadingRewardBg}
+                  onFile={onPickRewardBg}
+                />
+              </div>
+            )}
+            {/* 奖励图在背景框内的内边距 */}
+            {style.rewardBg && (
+              <div className="mt-3">
+                <Slider
+                  className="max-w-full"
+                  label="奖励图内边距"
+                  marks={[
+                    { value: 0, label: "0" },
+                    { value: 8, label: "8" },
+                    { value: 16, label: "16" },
+                    { value: 24, label: "24" },
+                    { value: 32, label: "32" },
+                  ]}
+                  maxValue={32}
+                  minValue={0}
+                  showTooltip={true}
+                  size="sm"
+                  step={8}
+                  tooltipProps={{
+                    placement: "top",
+                    content: `${style.rewardBgPad}px`,
+                  }}
+                  value={style.rewardBgPad}
+                  onChange={(value) =>
+                    setStyle((s) => ({ ...s, rewardBgPad: value as number }))
+                  }
+                />
+                <div className="text-xs text-gray-500 mt-1">
+                  奖励图与背景框边缘的距离，当前: {style.rewardBgPad}px
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-lg border border-gray-200 p-4 mt-4">
@@ -1767,6 +1982,37 @@ export default function PreviewPage() {
               />
               <div className="text-xs text-gray-500 mt-2">
                 可选值: 24px、26px、28px（其他文字大小将自动调整）
+              </div>
+            </div>
+
+            {/* 奖励图片与文字间距 */}
+            <div className="mt-6">
+              <Slider
+                className="max-w-full"
+                label="奖励图片与文字间距"
+                marks={[
+                  { value: 0, label: "0" },
+                  { value: 8, label: "8" },
+                  { value: 16, label: "16" },
+                  { value: 24, label: "24" },
+                  { value: 32, label: "32" },
+                ]}
+                maxValue={32}
+                minValue={0}
+                showTooltip={true}
+                size="sm"
+                step={8}
+                tooltipProps={{
+                  placement: "top",
+                  content: `${style.rewardImgGap}px`,
+                }}
+                value={style.rewardImgGap}
+                onChange={(value) =>
+                  setStyle((s) => ({ ...s, rewardImgGap: value as number }))
+                }
+              />
+              <div className="text-xs text-gray-500 mt-2">
+                奖励图片与名称之间的垂直间距，当前: {style.rewardImgGap}px
               </div>
             </div>
           </div>
@@ -1977,6 +2223,46 @@ export default function PreviewPage() {
         onClear={handleClearHistory}
         onDownload={handleDownloadFromHistory}
       />
+
+      {/* 飞书加载错误弹窗 */}
+      <Modal
+        backdrop="opaque"
+        isOpen={!!larkError}
+        size="md"
+        onOpenChange={(open) => {
+          if (!open) setLarkError(null);
+        }}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex items-center gap-2">
+                <span className="text-red-500">⚠️</span>
+                <span>飞书表格加载失败</span>
+              </ModalHeader>
+              <ModalBody>
+                <p className="text-sm text-gray-700 whitespace-pre-wrap break-all">
+                  {larkError}
+                </p>
+                <div className="text-xs text-gray-500 mt-2">
+                  常见原因：
+                  <ul className="list-disc pl-5 mt-1 space-y-0.5">
+                    <li>链接不是飞书电子表格 / Wiki 表格链接</li>
+                    <li>后端未登录飞书账号（运维需跑 lark-cli auth login）</li>
+                    <li>当前账号无权访问该文档</li>
+                    <li>飞书 API 调用超时（表格特别大时可能发生）</li>
+                  </ul>
+                </div>
+              </ModalBody>
+              <ModalFooter>
+                <Button color="primary" onPress={onClose}>
+                  知道了
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
     </div>
   );
 }

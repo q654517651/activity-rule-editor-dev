@@ -5,13 +5,36 @@
 import ExcelJS from 'exceljs';
 
 // RTL 地区列表
-const RTL_REGIONS = new Set(['MECA', 'ARAB', 'ARABIC', 'SA', 'UAE', 'EG', 'IL', 'ISRAEL', 'JO', 'LB', 'IQ', 'SY']);
+const RTL_REGIONS = new Set(['MECA', 'ARAB', 'ARABIC', 'SA', 'UAE', 'EG', 'IL', 'ISRAEL', 'JO', 'LB', 'IQ', 'SY', 'XM']);
 
 /**
- * 判断是否为 RTL 语言地区
+ * 检测字符串中是否包含 RTL（阿拉伯语 / 希伯来语）字符。
+ * 覆盖区间：
+ *  - 希伯来语 U+0590-U+05FF
+ *  - 阿拉伯语 U+0600-U+06FF
+ *  - 阿拉伯语补充 U+0750-U+077F
+ *  - 阿拉伯语扩展-A U+08A0-U+08FF
+ *  - 阿拉伯语表现形式-A U+FB50-U+FDFF
+ *  - 阿拉伯语表现形式-B U+FE70-U+FEFF
+ */
+function containsRTLChars(text) {
+  if (!text) return false;
+  return /[\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text);
+}
+
+/**
+ * 判断是否为 RTL 语言地区。
+ *
+ * 两种判定方式（满足任意一种即视为 RTL）：
+ *  1. region code 字符串中包含预定义的 RTL 地区标识（如 MECA、SA、IL 等）。
+ *  2. region code 字符串本身包含阿拉伯语 / 希伯来语字符
+ *     （兼容把阿拉伯文标题直接当作 region 名的情况）。
  */
 function isRTLRegion(regionCode) {
   if (!regionCode) return false;
+  // 方式 2：直接检测内容中的 RTL 字符
+  if (containsRTLChars(regionCode)) return true;
+  // 方式 1：匹配预定义地区代码
   const upperCode = regionCode.toUpperCase();
   return Array.from(RTL_REGIONS).some(rtl => upperCode.includes(rtl));
 }
