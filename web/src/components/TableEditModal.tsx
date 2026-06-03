@@ -57,15 +57,11 @@ export function TableEditModal({
       const dataUrl = e.target?.result as string;
       const newTable = { ...editedTable };
       
-      // 更新图片为 data URL
-      if (typeof newTable.rows[rowIdx][cellIdx].image === "string") {
-        newTable.rows[rowIdx][cellIdx].image = dataUrl;
-      } else {
-        newTable.rows[rowIdx][cellIdx].image = {
-          url: dataUrl,
-          id: `local-${Date.now()}`,
-        };
-      }
+      // 更新图片为 data URL（统一使用对象格式）
+      newTable.rows[rowIdx][cellIdx].image = {
+        url: dataUrl,
+        id: `local-${Date.now()}`,
+      };
       
       setEditedTable(newTable);
     };
