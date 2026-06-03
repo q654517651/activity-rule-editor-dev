@@ -4,21 +4,96 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 from openpyxl import load_workbook
+from openpyxl.descriptors import Typed
+from openpyxl.styles import colors as _opx_colors
+
+
+# ---------------------------------------------------------------------------
+# openpyxl 颜色校验宽容补丁
+#
+# 背景：WPS / 飞书表格 / Google Sheets 等工具导出的 xlsx，其 xl/styles.xml
+# 中可能包含 openpyxl 不接受的颜色值（非 6/8 位 aRGB 十六进制，例如空字符串、
+# "windowText"、3 位简写等）。openpyxl 默认会在 load_workbook 阶段直接抛出
+# "Colors must be aRGB hex values"，导致整个工作簿无法读取。
+#
+# 由于本项目使用 data_only=True 只关心单元格的值，不依赖样式颜色，这里将
+# RGB 描述符的校验改为「遇到非法颜色回退黑色」，从而保证文件总能被读取。
+# ---------------------------------------------------------------------------
+def _tolerant_rgb_set(self, instance, value):
+    if value is None:
+        # 允许为空时直接交给基类处理
+        if getattr(self, "allow_none", False):
+            Typed.__set__(self, instance, value)
+            return
+        value = "00000000"
+
+    sval = str(value)
+    if _opx_colors.aRGB_REGEX.match(sval) is None:
+        # 非法颜色，回退为黑色，避免读取失败
+        sval = "00000000"
+    elif len(sval) == 6:
+        sval = "00" + sval
+
+    Typed.__set__(self, instance, sval)
+
+
+# 只打一次补丁
+if not getattr(_opx_colors.RGB, "_arg_tolerant_patched", False):
+    _opx_colors.RGB.__set__ = _tolerant_rgb_set
+    _opx_colors.RGB._arg_tolerant_patched = True
 
 
 # RTL 地区列表（中东、阿拉伯语地区、希伯来语地区等）
-RTL_REGIONS = {'MECA', 'ARAB', 'ARABIC', 'SA', 'UAE', 'EG', 'IL', 'ISRAEL', 'JO', 'LB', 'IQ', 'SY'}
+RTL_REGIONS = {'MECA', 'ARAB', 'ARABIC', 'SA', 'UAE', 'EG', 'IL', 'ISRAEL', 'JO', 'LB', 'IQ', 'SY', 'XM'}
+
+
+def _contains_rtl_chars(text: str) -> bool:
+    """
+    检测字符串中是否包含 RTL（阿拉伯语 / 希伯来语）字符。
+
+    覆盖的 Unicode 区间：
+    - 阿拉伯语：U+0600-U+06FF
+    - 阿拉伯语补充：U+0750-U+077F
+    - 阿拉伯语扩展-A：U+08A0-U+08FF
+    - 阿拉伯语表现形式-A：U+FB50-U+FDFF
+    - 阿拉伯语表现形式-B：U+FE70-U+FEFF
+    - 希伯来语：U+0590-U+05FF
+    """
+    if not text:
+        return False
+    for ch in text:
+        code = ord(ch)
+        if (
+            0x0590 <= code <= 0x05FF  # 希伯来语
+            or 0x0600 <= code <= 0x06FF  # 阿拉伯语
+            or 0x0750 <= code <= 0x077F  # 阿拉伯语补充
+            or 0x08A0 <= code <= 0x08FF  # 阿拉伯语扩展-A
+            or 0xFB50 <= code <= 0xFDFF  # 阿拉伯语表现形式-A
+            or 0xFE70 <= code <= 0xFEFF  # 阿拉伯语表现形式-B
+        ):
+            return True
+    return False
 
 
 def is_rtl_region(region_code: str) -> bool:
     """
-    根据地区代码判断是否为 RTL（从右到左）语言
+    根据地区代码判断是否为 RTL（从右到左）语言。
+
+    两种判定方式（满足任意一种即视为 RTL）：
+    1. region code 字符串中包含预定义的 RTL 地区标识（如 MECA、SA、IL 等）。
+    2. region code 字符串本身包含阿拉伯语 / 希伯来语字符
+       （兼容把阿拉伯文标题直接当作 region 名的情况，例如
+       `REGION-جوائز قائمة المرسلين`）。
     """
     if not region_code:
         return False
-    
+
+    # 方式 2：直接检测内容中的 RTL 字符
+    if _contains_rtl_chars(region_code):
+        return True
+
+    # 方式 1：匹配预定义地区代码
     upper_code = region_code.upper()
-    # 检查是否包含任何 RTL 地区标识
     return any(rtl in upper_code for rtl in RTL_REGIONS)
 
 
@@ -34,6 +109,85 @@ def clean_text(v) -> str:
     if s.startswith("="):
         s = s[1:]
     return s.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _extract_decimals(format_part: str) -> int:
+    """从格式字符串的某一段中提取小数位数。
+
+    例如：
+      '0.00%'   -> 2
+      '#,##0.0' -> 1
+      '#,##0'   -> 0
+    """
+    if '.' not in format_part:
+        return 0
+    after_dot = format_part.split('.', 1)[1]
+    count = 0
+    for ch in after_dot:
+        if ch in '0#':
+            count += 1
+        else:
+            break
+    return count
+
+
+def format_cell_value(value, number_format: str):
+    """根据 Excel number_format 将数字单元格的值格式化为字符串。
+
+    支持的格式：
+    - 百分号：0%, 0.00%, 0.0% 等
+    - 千分位：#,##0, #,##0.00, #,##0_);(#,##0) 等
+    - 固定小数位：0.00, 0.0 等
+    - 货币（保留前缀符号 + 千分位）：¥#,##0.00, $#,##0 等
+
+    其他格式 / 非数字 / 布尔 / None / General 一律原样返回。
+    """
+    if value is None:
+        return value
+    # bool 是 int 的子类，必须显式排除
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, (int, float)):
+        return value
+    if not number_format or number_format == 'General':
+        return value
+
+    # 取正数段（用 ; 分隔的第一段）
+    main_format = number_format.split(';')[0].strip()
+    if not main_format:
+        return value
+
+    decimals = _extract_decimals(main_format)
+
+    # 百分号格式
+    if '%' in main_format:
+        return f'{value * 100:.{decimals}f}%'
+
+    # 是否带千分位
+    has_thousands = '#,##0' in main_format or '#,###' in main_format
+
+    if has_thousands:
+        formatted = f'{value:,.{decimals}f}'
+    elif decimals > 0:
+        formatted = f'{value:.{decimals}f}'
+    elif '0' in main_format or '#' in main_format:
+        # 纯数字格式，无小数位
+        formatted = f'{value:.0f}' if isinstance(value, float) else str(value)
+    else:
+        return value
+
+    # 简单提取货币 / 前缀符号（如 ¥、$、€、£、￥、HK$、US$ 等）
+    # 仅保留出现在数字模式之前的非占位字符（去掉 _、引号、转义符）
+    prefix = ''
+    for ch in main_format:
+        if ch in '#0,.':
+            break
+        if ch in '_*\\"\'[]':
+            continue
+        prefix += ch
+    prefix = prefix.strip()
+
+    return f'{prefix}{formatted}' if prefix else formatted
 
 
 def build_merge_index(ws) -> Dict[Tuple[int, int], Tuple[int, int, int, int]]:
@@ -53,13 +207,9 @@ def get_cell_info(ws, r: int, c: int, merge_idx):
     else:
         cell = ws.cell(r, c)
     
-    # 读取单元格的值
-    value = cell.value
-    
-    # 检查是否为百分比格式
-    if isinstance(value, (int, float)) and cell.number_format:
-        if '%' in cell.number_format:
-            value = f"{value * 100:.10g}%"
+    # 读取单元格的值，并按 number_format 烘焙成显示用文本
+    # （百分号、千分位、固定小数位、货币前缀等）
+    value = format_cell_value(cell.value, cell.number_format)
     
     # 读取对齐信息
     alignment = None

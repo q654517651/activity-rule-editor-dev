@@ -83,6 +83,9 @@ export type StyleCfg = {
   };
   blockTitleBg?: string; // 大标题背景（TITLE-）
   sectionTitleBg?: string; // 小标题背景（RULES-/RANK-）
+  rewardBg?: string; // 奖励图背景图片（铺满，不拉伸裁切）
+  rewardBgPad: number; // 奖励图片与背景框边缘的内边距（px），防止奖励图与背景重合
+  rewardImgGap: number; // 奖励图片与下方文字的间距（px）
   font: {
     family: string;
     size: number;
